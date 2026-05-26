@@ -14,16 +14,16 @@
   },
   "dependencies": {
     "@mealendar/shared": "workspace:*",
-    "@supabase/supabase-js": "2.106.1",
-    "hono": "4.12.22",
+    "@supabase/supabase-js": "2.106.2",
+    "hono": "4.12.23",
     "jose": "6.2.3",
     "zod": "3.23.8"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "4.20260522.1",
+    "@cloudflare/workers-types": "4.20260526.1",
     "@vitest/coverage-v8": "2.1.8",
     "typescript": "5.9.3",
     "vitest": "2.1.8",
-    "wrangler": "4.94.0"
+    "wrangler": "4.95.0"
   }
 }
