@@ -1,26 +1,19 @@
 import { EmptyState } from '@/components/EmptyState';
 import { GenerateRecipeModal } from '@/components/GenerateRecipeModal';
 import { ImportRecipeModal } from '@/components/ImportRecipeModal';
+import { SkeletonRecipeList } from '@/components/Skeleton';
 import { Topbar } from '@/components/Topbar';
 import { useHouseholdDetail } from '@/hooks/useHouseholds';
 import { useRecipes, useToggleRecipeFavorite } from '@/hooks/useRecipes';
 import { ApiError } from '@/lib/api';
+import { haptics } from '@/lib/haptics';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import type { RecipeListItem } from '@mealendar/shared';
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { FlatList, RefreshControl, StyleSheet, View } from 'react-native';
-import {
-  ActivityIndicator,
-  Chip,
-  FAB,
-  IconButton,
-  Searchbar,
-  Surface,
-  Text,
-  useTheme,
-} from 'react-native-paper';
+import { Chip, FAB, IconButton, Searchbar, Surface, Text, useTheme } from 'react-native-paper';
 import { TouchableRipple } from 'react-native-paper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -112,11 +105,7 @@ export default function RecipesListScreen() {
         />
       </View>
 
-      {recipes.isPending && (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={theme.colors.primary} />
-        </View>
-      )}
+      {recipes.isPending && <SkeletonRecipeList count={4} />}
 
       {recipes.isError && (
         <View style={styles.center}>
@@ -296,7 +285,10 @@ function RecipeCard({ recipe }: { recipe: RecipeListItem }) {
               icon={recipe.isFavorite ? 'heart' : 'heart-outline'}
               iconColor={recipe.isFavorite ? theme.colors.secondary : theme.colors.onSurfaceVariant}
               size={20}
-              onPress={() => toggleFav.mutate({ id: recipe.id, householdId: recipe.householdId })}
+              onPress={() => {
+                haptics.medium();
+                toggleFav.mutate({ id: recipe.id, householdId: recipe.householdId });
+              }}
               style={styles.favBtn}
             />
           </View>

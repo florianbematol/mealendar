@@ -7,7 +7,9 @@ import {
 } from '@/hooks/useHouseholds';
 import { useMe } from '@/hooks/useMe';
 import { ApiError } from '@/lib/api';
+import { haptics } from '@/lib/haptics';
 import { useActiveHousehold } from '@/stores/activeHousehold';
+import { toast } from '@/stores/toast';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { Alert, ScrollView, Share, StyleSheet, View } from 'react-native';
@@ -85,8 +87,11 @@ export default function HouseholdDetailScreen() {
         onPress: async () => {
           try {
             await regen.mutateAsync({ id: h.id });
+            haptics.success();
+            toast.success("Nouveau code d'invitation genere");
           } catch (e) {
-            Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+            haptics.error();
+            toast.error(e instanceof Error ? e.message : 'Erreur inconnue');
           }
         },
       },

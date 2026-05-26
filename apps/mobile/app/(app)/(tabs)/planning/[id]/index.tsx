@@ -12,6 +12,7 @@ import {
 import { useRecipes } from '@/hooks/useRecipes';
 import { ApiError, fetchPlanningIcs } from '@/lib/api';
 import { WEEKDAY_LABELS, addDays, fromIsoDate, rangeDates, weekdayOf } from '@/lib/dates';
+import { haptics } from '@/lib/haptics';
 import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import type { DietComponent, PlannedMeal, RecipeListItem } from '@mealendar/shared';
@@ -198,7 +199,9 @@ export default function PlanningDetailScreen() {
     });
     try {
       await setMeals.mutateAsync({ meals: generated, keepLocked: true });
+      haptics.success();
     } catch (e) {
+      haptics.error();
       Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
     }
   };
@@ -251,6 +254,7 @@ export default function PlanningDetailScreen() {
                 planningId: planning.data?.id ?? '',
                 keepLocked: true,
               });
+              haptics.success();
               const skippedTxt =
                 res.skipped > 0
                   ? ` ${res.skipped} slot${res.skipped > 1 ? 's' : ''} non rempli${res.skipped > 1 ? 's' : ''}.`
@@ -260,6 +264,7 @@ export default function PlanningDetailScreen() {
                 `${res.filled} repas planifie${res.filled > 1 ? 's' : ''}.${skippedTxt}`,
               );
             } catch (e) {
+              haptics.error();
               if (e instanceof ApiError) {
                 Alert.alert('Erreur IA', `${e.status} - ${e.message}`);
               } else {
@@ -361,6 +366,7 @@ export default function PlanningDetailScreen() {
   };
 
   const onToggleLock = async (meal: PlannedMeal) => {
+    haptics.light();
     try {
       await updateMeal.mutateAsync({
         mealId: meal.id,

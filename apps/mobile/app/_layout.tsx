@@ -1,4 +1,5 @@
 import { ConfigErrorScreen } from '@/components/ConfigErrorScreen';
+import { ToastHost } from '@/components/ToastHost';
 import { useAuth } from '@/hooks/useAuth';
 import {
   configureNotificationHandler,
@@ -76,6 +77,7 @@ export default function RootLayout() {
         <QueryClientProvider client={queryClient}>
           <StatusBar style="dark" />
           {isSupabaseConfigured ? <RootStack /> : <ConfigErrorScreen />}
+          <ToastHost />
         </QueryClientProvider>
       </PaperProvider>
     </SafeAreaProvider>

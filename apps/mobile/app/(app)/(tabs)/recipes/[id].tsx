@@ -9,6 +9,7 @@ import {
   useUpdateRecipe,
 } from '@/hooks/useRecipes';
 import { ApiError } from '@/lib/api';
+import { haptics } from '@/lib/haptics';
 import { Image } from 'expo-image';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react';
@@ -45,13 +46,14 @@ export default function RecipeDetailScreen() {
             <IconButton
               icon={recipe.data.isFavorite ? 'heart' : 'heart-outline'}
               iconColor={recipe.data.isFavorite ? theme.colors.secondary : undefined}
-              onPress={() =>
-                recipe.data &&
+              onPress={() => {
+                if (!recipe.data) return;
+                haptics.medium();
                 toggleFav.mutate({
                   id: recipe.data.id,
                   householdId: recipe.data.householdId,
-                })
-              }
+                });
+              }}
               size={20}
             />
             <IconButton icon="pencil-outline" onPress={() => setEditing(true)} size={20} />
