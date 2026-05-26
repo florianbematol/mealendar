@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Mealendar",
+    "slug": "mealendar",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "mealendar",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anomalyco.mealendar"
+    },
+    "android": {
+      "package": "com.anomalyco.mealendar",
+      "edgeToEdgeEnabled": true,
+      "navigationBar": {
+        "backgroundColor": "#FFFFFF",
+        "barStyle": "dark-content"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Mealendar utilise la camera pour scanner les codes-barres et identifier les produits."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Mealendar a besoin d'acceder a vos photos pour ajouter des images a vos recettes.",
+          "cameraPermission": "Mealendar utilise la camera pour photographier vos plats."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#3F7D58"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": false
+    },
+    "extra": {
+      "apiBaseUrl": "http://localhost:8787"
+    }
+  }
+}
