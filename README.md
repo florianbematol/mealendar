@@ -180,6 +180,46 @@ Le tracking se fait dans une table `_mealendar_migrations` creee automatiquement
 
 Voir [`supabase/README.md`](./supabase/README.md).
 
+## Deploiement API (Cloudflare Workers)
+
+### Manuel (premiere fois)
+
+```bash
+cd apps/api
+wrangler login                                # une seule fois
+wrangler kv namespace create CACHE            # creer le namespace KV
+# -> copier l'id genere dans wrangler.toml (section [[kv_namespaces]])
+
+# Pousser les secrets (a faire une fois, pas via CI) :
+wrangler secret put SUPABASE_URL
+wrangler secret put SUPABASE_ANON_KEY
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+wrangler secret put SUPABASE_JWT_SECRET
+wrangler secret put GEMINI_API_KEY
+wrangler secret put GROQ_API_KEY              # optionnel, fallback
+wrangler secret put ADMIN_TOKEN               # optionnel, pour /api/admin/*
+
+wrangler deploy
+```
+
+### Automatique (CI)
+
+Le workflow `.github/workflows/deploy-api.yml` redeploie le Worker a chaque
+push sur `main` qui touche `apps/api/**`, `packages/shared/**` ou le lockfile.
+Lance aussi lint + typecheck + tests avant.
+
+Pre-requis : ajouter dans GitHub Settings > Secrets and variables > Actions :
+
+- `CLOUDFLARE_API_TOKEN` : Dashboard Cloudflare > My Profile > API Tokens >
+  template **Edit Cloudflare Workers** (scope sur le compte uniquement, pas
+  sur les zones DNS).
+- `CLOUDFLARE_ACCOUNT_ID` : Dashboard Cloudflare > Workers & Pages > sidebar
+  droite ("Account ID").
+
+Les secrets du Worker (SUPABASE_*, GEMINI_*, etc.) sont **pousses manuellement**
+une fois (cf. section ci-dessus). Le CI ne les manipule pas pour reduire la
+surface d'attaque.
+
 ## Roadmap
 
 - [x] Phase 0 - Setup monorepo, Worker `/health`, app Expo, migration foyers
