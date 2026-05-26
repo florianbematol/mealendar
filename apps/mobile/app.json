@@ -7,12 +7,12 @@
     "scheme": "mealendar",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "assetBundlePatterns": [
-      "**/*"
-    ],
+    "icon": "./assets/icon.png",
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anomalyco.mealendar"
+      "bundleIdentifier": "com.anomalyco.mealendar",
+      "icon": "./assets/icon.png"
     },
     "android": {
       "package": "com.anomalyco.mealendar",
@@ -21,13 +21,15 @@
         "backgroundColor": "#FFFFFF",
         "barStyle": "dark-content"
       },
-      "permissions": [
-        "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO"
-      ]
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#3F7D58"
+      },
+      "permissions": ["android.permission.CAMERA", "android.permission.RECORD_AUDIO"]
     },
     "web": {
-      "bundler": "metro"
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-router",
@@ -49,6 +51,15 @@
         {
           "icon": "./assets/icon.png",
           "color": "#3F7D58"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#3F7D58"
         }
       ]
     ],
