@@ -1,16 +1,16 @@
 name: Deploy API
 
 on:
-  # Manuel : declenche depuis l'onglet Actions
+  # Manuel uniquement : declenche depuis l'onglet Actions de GitHub.
+  # Volontairement pas d'auto-deploy sur push main : on prefere un acte
+  # explicite pour eviter de cramer le quota Cloudflare ou pousser un fix
+  # urgent par accident.
   workflow_dispatch:
-  # Auto : apres un push sur main qui touche au backend
-  push:
-    branches: [main]
-    paths:
-      - 'apps/api/**'
-      - 'packages/shared/**'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/deploy-api.yml'
+    inputs:
+      reason:
+        description: 'Raison du deploy (visible dans les logs)'
+        required: false
+        default: 'Manual deploy'
 
 concurrency:
   group: deploy-api-${{ github.ref }}
@@ -20,7 +20,6 @@ jobs:
   deploy:
     name: deploy mealendar-api to cloudflare workers
     runs-on: ubuntu-latest
-    # Eviter les deploiements depuis les forks
     if: github.repository == 'florianbematol/mealendar'
     steps:
       - uses: actions/checkout@v4
@@ -61,3 +60,12 @@ jobs:
           #   cd apps/api && wrangler secret put SUPABASE_URL
           # ... pour chaque variable. Voir README racine.
           packageManager: pnpm
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Deploy API result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Reason: ${{ inputs.reason }}" >> $GITHUB_STEP_SUMMARY
+          echo "Triggered by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

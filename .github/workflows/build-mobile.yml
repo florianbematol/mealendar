@@ -1,0 +1,96 @@
+name: Build Mobile
+
+on:
+  # Manuel uniquement (workflow_dispatch). On ne build pas automatiquement
+  # car EAS Build a un free tier limite (~30 builds/mois) et la plupart des
+  # commits ne necessitent pas un nouveau APK.
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Plateforme cible'
+        required: true
+        type: choice
+        default: 'android'
+        options:
+          - 'android'
+          - 'ios'
+          - 'all'
+      profile:
+        description: 'Profil EAS (cf. apps/mobile/eas.json)'
+        required: true
+        type: choice
+        default: 'preview'
+        options:
+          - 'development'
+          - 'preview'
+          - 'production'
+      reason:
+        description: 'Raison du build (visible dans les logs)'
+        required: false
+        default: 'Manual build'
+
+concurrency:
+  group: build-mobile-${{ github.ref }}-${{ inputs.platform }}-${{ inputs.profile }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: eas build ${{ inputs.platform }} (${{ inputs.profile }})
+    runs-on: ubuntu-latest
+    if: github.repository == 'florianbematol/mealendar'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Setup EAS
+        # Doc : https://github.com/expo/expo-github-action
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build with EAS
+        working-directory: apps/mobile
+        run: |
+          eas build \
+            --platform ${{ inputs.platform }} \
+            --profile ${{ inputs.profile }} \
+            --non-interactive \
+            --no-wait
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Build Mobile triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Platform: ${{ inputs.platform }}" >> $GITHUB_STEP_SUMMARY
+          echo "Profile: ${{ inputs.profile }}" >> $GITHUB_STEP_SUMMARY
+          echo "Reason: ${{ inputs.reason }}" >> $GITHUB_STEP_SUMMARY
+          echo "Triggered by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Suivi du build** : https://expo.dev/accounts/smoothpanda/projects/mealendar/builds" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Le build tourne sur les serveurs Expo (10-20 min). Le download APK/IPA" >> $GITHUB_STEP_SUMMARY
+          echo "sera disponible sur le dashboard Expo une fois termine." >> $GITHUB_STEP_SUMMARY

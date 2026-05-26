@@ -180,7 +180,9 @@ Le tracking se fait dans une table `_mealendar_migrations` creee automatiquement
 
 Voir [`supabase/README.md`](./supabase/README.md).
 
-## Deploiement API (Cloudflare Workers)### Manuel (premiere fois)
+## Deploiement API (Cloudflare Workers)
+
+### Manuel (premiere fois)
 
 ```bash
 cd apps/api
@@ -200,13 +202,21 @@ wrangler secret put ADMIN_TOKEN               # optionnel, pour /api/admin/*
 wrangler deploy
 ```
 
-### Automatique (CI)
+### CI (manuel via GitHub Actions UI)
 
-Le workflow `.github/workflows/deploy-api.yml` redeploie le Worker a chaque
-push sur `main` qui touche `apps/api/**`, `packages/shared/**` ou le lockfile.
-Lance aussi lint + typecheck + tests avant.
+Le workflow `.github/workflows/deploy-api.yml` est manuel uniquement
+(`workflow_dispatch`). Pour deployer :
 
-Pre-requis : ajouter dans GitHub Settings > Secrets and variables > Actions :
+1. Aller sur https://github.com/florianbematol/mealendar/actions/workflows/deploy-api.yml
+2. Cliquer **Run workflow** > saisir une raison (optionnel) > **Run workflow**
+3. Le job lance lint + typecheck + tests + `wrangler deploy`
+
+> Volontairement pas d'auto-deploy sur push main : on prefere un acte
+> explicite pour eviter de cramer le quota Cloudflare ou pousser un fix
+> urgent par accident. Les secrets du Worker (SUPABASE_*, etc.) sont
+> pousses manuellement une fois (cf. section ci-dessus).
+
+Pre-requis (GitHub Settings > Secrets and variables > Actions) :
 
 - `CLOUDFLARE_API_TOKEN` : Dashboard Cloudflare > My Profile > API Tokens >
   template **Edit Cloudflare Workers** (scope sur le compte uniquement, pas
@@ -214,9 +224,34 @@ Pre-requis : ajouter dans GitHub Settings > Secrets and variables > Actions :
 - `CLOUDFLARE_ACCOUNT_ID` : Dashboard Cloudflare > Workers & Pages > sidebar
   droite ("Account ID").
 
-Les secrets du Worker (SUPABASE_*, GEMINI_*, etc.) sont **pousses manuellement**
-une fois (cf. section ci-dessus). Le CI ne les manipule pas pour reduire la
-surface d'attaque.
+## Build Mobile (EAS via GitHub Actions)
+
+Le workflow `.github/workflows/build-mobile.yml` est manuel uniquement
+(`workflow_dispatch`). Pour lancer un build :
+
+1. Aller sur https://github.com/florianbematol/mealendar/actions/workflows/build-mobile.yml
+2. Cliquer **Run workflow** :
+   - **platform** : `android`, `ios`, ou `all`
+   - **profile** : `development` (Dev Client APK), `preview` (APK installable),
+     `production` (AAB pour Play Store)
+3. Le job lance lint + typecheck + tests + `eas build`
+
+Le build tourne ensuite sur les serveurs Expo (10-20 min). Suivi et
+telechargement APK/IPA disponibles sur le dashboard Expo :
+https://expo.dev/accounts/smoothpanda/projects/mealendar/builds
+
+> Manuel volontaire : EAS Build a un free tier limite (~30 builds/mois) et
+> la plupart des commits ne necessitent pas un nouveau APK.
+
+Pre-requis :
+
+- `EXPO_TOKEN` dans GitHub secrets : token Expo CI (Dashboard Expo >
+  Profile > Access Tokens > Create token, scope minimum "build").
+- Les variables `EXPO_PUBLIC_*` (URL API, Supabase) sont gerees via
+  `eas env:create --scope project --environment <env>` et liees au profil
+  EAS via le champ `environment` dans `eas.json`.
+
+
 
 ## Workflow PR (recommande)
 
