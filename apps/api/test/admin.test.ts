@@ -2,9 +2,10 @@
  * Tests pour le router admin : authentification par X-Admin-Token + endpoint
  * scheduler/run.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { app } from '../src/index';
 import * as expoPush from '../src/lib/expoPush';
+import * as supabaseLib from '../src/lib/supabase';
 
 const ADMIN_TOKEN = 'test-admin-secret';
 
@@ -15,6 +16,31 @@ const baseEnv = {
   SUPABASE_SERVICE_ROLE_KEY: 'srv-key',
   SUPABASE_JWT_SECRET: 'jwt-secret-with-enough-entropy-1234567890',
 } as const;
+
+/** Mock Supabase client minimal qui renvoie data: [] partout. */
+function makeFakeServiceClient() {
+  const builder: any = {
+    select: vi.fn(() => builder),
+    eq: vi.fn(() => builder),
+    in: vi.fn(() => builder),
+    not: vi.fn(() => builder),
+    is: vi.fn(() => builder),
+    lte: vi.fn(() => builder),
+    gte: vi.fn(() => builder),
+    update: vi.fn(() => builder),
+    then: (resolve: (v: { data: unknown[]; error: null }) => void) =>
+      resolve({ data: [], error: null }),
+  };
+  return { from: vi.fn(() => builder) };
+}
+
+beforeEach(() => {
+  // Stub sendExpoPushMessages pour ne JAMAIS toucher l'API Expo en CI.
+  vi.spyOn(expoPush, 'sendExpoPushMessages').mockResolvedValue([]);
+  // Stub getServiceClient pour eviter de creer un vrai client Supabase qui
+  // tenterait des requetes HTTP vers https://test.supabase.co.
+  vi.spyOn(supabaseLib, 'getServiceClient').mockReturnValue(makeFakeServiceClient() as any);
+});
 
 describe('admin router', () => {
   it('returns 503 if ADMIN_TOKEN is not configured', async () => {
@@ -66,9 +92,6 @@ describe('admin router', () => {
   });
 
   it('runs scheduler with given `now` and returns outcome', async () => {
-    // On stub sendExpoPushMessages pour ne pas appeler le vrai endpoint
-    vi.spyOn(expoPush, 'sendExpoPushMessages').mockResolvedValue([]);
-
     // 2026-01-15 10:00 UTC = 11h Paris (CET) -> rien a envoyer
     const res = await app.request(
       '/api/admin/scheduler/run',
