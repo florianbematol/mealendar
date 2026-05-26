@@ -7,7 +7,9 @@
     "scheme": "mealendar",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.anomalyco.mealendar"
@@ -18,7 +20,11 @@
       "navigationBar": {
         "backgroundColor": "#FFFFFF",
         "barStyle": "dark-content"
-      }
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "bundler": "metro"
@@ -50,7 +56,12 @@
       "typedRoutes": false
     },
     "extra": {
-      "apiBaseUrl": "http://localhost:8787"
-    }
+      "apiBaseUrl": "http://localhost:8787",
+      "router": {},
+      "eas": {
+        "projectId": "977ae9fd-8f51-418d-953b-31bf8618eef0"
+      }
+    },
+    "owner": "smoothpanda"
   }
 }
