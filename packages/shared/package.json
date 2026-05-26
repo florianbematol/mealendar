@@ -10,12 +10,14 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "2.1.8",
     "typescript": "5.9.3",
     "vitest": "2.1.8"
   }

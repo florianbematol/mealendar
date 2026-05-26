@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # npm packages : monorepo pnpm. Dependabot supporte pnpm depuis 2024.
+  # Une seule entree pour le root suffit, dependabot crawle les workspaces.
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '07:00'
+      timezone: 'Europe/Paris'
+    open-pull-requests-limit: 5
+    labels:
+      - 'dependencies'
+      - 'npm'
+    # Group les minor/patch updates pour reduire le bruit. Les majors restent
+    # en PRs separees pour qu'on puisse les reviewer une par une.
+    groups:
+      minor-and-patch:
+        patterns: ['*']
+        update-types:
+          - 'minor'
+          - 'patch'
+    # Ignorer les bumps majeurs sur React/RN qui demandent du travail manuel
+    # (Hermes, breaking changes, etc.). On les fera a la main.
+    ignore:
+      - dependency-name: 'react'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-native'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'expo'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'expo-*'
+        update-types: ['version-update:semver-major']
+
+  # GitHub Actions : check tous les vendredis matin
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'friday'
+      time: '07:00'
+      timezone: 'Europe/Paris'
+    open-pull-requests-limit: 3
+    labels:
+      - 'dependencies'
+      - 'github-actions'

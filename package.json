@@ -13,6 +13,7 @@
     "lint:fix": "biome check --write .",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
+    "test:coverage": "pnpm -r test:coverage",
     "dev:api": "pnpm --filter @mealendar/api dev",
     "dev:mobile": "pnpm --filter @mealendar/mobile start",
     "db:push": "node scripts/db-push.mjs",

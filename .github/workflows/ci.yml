@@ -10,6 +10,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Permissions minimales pour que vitest-coverage-report-action puisse poster
+# un commentaire sur les PRs.
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   ci:
     name: typecheck / lint / test
@@ -25,7 +31,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install
@@ -37,5 +43,30 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Test
-        run: pnpm test
+      - name: Test with coverage
+        run: pnpm test:coverage
+
+      - name: Upload coverage report (api)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-api
+          path: apps/api/coverage
+          retention-days: 14
+
+      - name: Upload coverage report (shared)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shared
+          path: packages/shared/coverage
+          retention-days: 14
+
+      - name: Coverage summary in PR
+        if: github.event_name == 'pull_request'
+        uses: davelosert/vitest-coverage-report-action@v2
+        with:
+          working-directory: apps/api
+          json-summary-path: apps/api/coverage/coverage-summary.json
+          json-final-path: apps/api/coverage/coverage-final.json
+        continue-on-error: true

@@ -10,7 +10,8 @@
     "web": "expo start --web",
     "tunnel": "expo start --tunnel",
     "typecheck": "tsc --noEmit",
-    "test": "echo \"no tests yet\" && exit 0"
+    "test": "echo \"no tests yet\" && exit 0",
+    "test:coverage": "echo \"no tests yet\" && exit 0"
   },
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",

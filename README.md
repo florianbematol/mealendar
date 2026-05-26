@@ -39,7 +39,7 @@ mealendar/
 
 ## Pre-requis
 
-- Node 20+
+- Node 20+ (la CI tourne sur Node 24, recommande pour eviter les warnings)
 - pnpm 10+
 - Comptes (gratuits) : Cloudflare, Supabase, Google AI Studio
 - Pour iOS : Mac (sinon test via Expo Go uniquement)
@@ -180,9 +180,7 @@ Le tracking se fait dans une table `_mealendar_migrations` creee automatiquement
 
 Voir [`supabase/README.md`](./supabase/README.md).
 
-## Deploiement API (Cloudflare Workers)
-
-### Manuel (premiere fois)
+## Deploiement API (Cloudflare Workers)### Manuel (premiere fois)
 
 ```bash
 cd apps/api
@@ -219,6 +217,28 @@ Pre-requis : ajouter dans GitHub Settings > Secrets and variables > Actions :
 Les secrets du Worker (SUPABASE_*, GEMINI_*, etc.) sont **pousses manuellement**
 une fois (cf. section ci-dessus). Le CI ne les manipule pas pour reduire la
 surface d'attaque.
+
+## Workflow PR (recommande)
+
+Le repo a un PR template (`.github/pull_request_template.md`). Pour un workflow
+sain :
+
+- Travailler sur une branche dediee, jamais sur `main`.
+- Push + ouvrir une PR avec `gh pr create` (utilise le template).
+- Attendre que la CI passe (lint + typecheck + tests + coverage report posted
+  en commentaire de la PR).
+- Merge en squash pour garder l'historique propre.
+
+> Note : la branch protection (block direct push to main, required PR reviews)
+> n'est pas activee car elle necessite GitHub Pro pour les repos prives. Sur
+> un repo public ou avec un compte Pro, l'activer dans Settings > Branches.
+
+## Dependabot
+
+Le repo a un `.github/dependabot.yml` qui cree des PRs automatiques chaque
+lundi matin pour les npm minor/patch (groupes), et chaque vendredi pour les
+GitHub Actions. Les bumps majeurs sur React/RN/Expo sont ignores et doivent
+etre faits manuellement.
 
 ## Roadmap
 
