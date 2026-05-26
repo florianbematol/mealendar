@@ -1,11 +1,15 @@
 import { Topbar } from '@/components/Topbar';
 import { useAuth } from '@/hooks/useAuth';
 import { useMe } from '@/hooks/useMe';
+import { sendTestPush } from '@/lib/api';
+import { haptics } from '@/lib/haptics';
 import { unregisterForPushNotifications } from '@/lib/pushNotifications';
 import { supabase } from '@/lib/supabase';
 import { clearActiveHousehold, useActiveHousehold } from '@/stores/activeHousehold';
+import { toast } from '@/stores/toast';
 import { useQueryClient } from '@tanstack/react-query';
 import { router } from 'expo-router';
+import { useState } from 'react';
 import { Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { Button, Chip, Divider, Surface, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,6 +21,31 @@ export default function ProfileScreen() {
   const me = useMe(!!session);
   const activeHouseholdId = useActiveHousehold((s) => s.householdId);
   const setHouseholdId = useActiveHousehold((s) => s.setHouseholdId);
+  const [testingPush, setTestingPush] = useState(false);
+
+  const onTestPush = async () => {
+    setTestingPush(true);
+    try {
+      const res = await sendTestPush();
+      haptics.success();
+      const msg =
+        res.errors > 0
+          ? `${res.sent} push envoye${res.sent > 1 ? 's' : ''}, ${res.errors} en erreur (token invalide ?).`
+          : `${res.sent} notification${res.sent > 1 ? 's' : ''} envoyee${res.sent > 1 ? 's' : ''}. Verifiez votre telephone.`;
+      toast.success(msg);
+    } catch (e) {
+      haptics.error();
+      const message =
+        e instanceof Error
+          ? e.message.includes('no_tokens')
+            ? "Aucun device enregistre. Essayez de fermer/rouvrir l'app pour relancer la registration."
+            : e.message
+          : 'Erreur inconnue';
+      toast.error(message);
+    } finally {
+      setTestingPush(false);
+    }
+  };
 
   const onSignOut = async () => {
     Alert.alert('Deconnexion', 'Voulez-vous vous deconnecter ?', [
@@ -205,21 +234,28 @@ export default function ProfileScreen() {
           <Text variant="labelLarge" style={styles.sectionTitle}>
             Preferences
           </Text>
-          <Surface elevation={0} style={[styles.row, { backgroundColor: theme.colors.surface }]}>
-            <Text variant="bodyMedium">Notifications</Text>
-            <Chip
+          <Surface
+            elevation={0}
+            style={[styles.linkRow, { backgroundColor: theme.colors.surface }]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text variant="titleSmall" style={{ fontWeight: '700' }}>
+                Notifications
+              </Text>
+              <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                Envoyer une notification de test pour valider votre device.
+              </Text>
+            </View>
+            <Button
+              mode="text"
               compact
-              icon="bell-off-outline"
-              style={{ backgroundColor: theme.colors.surfaceVariant }}
+              icon="bell-ring-outline"
+              loading={testingPush}
+              disabled={testingPush}
+              onPress={onTestPush}
             >
-              Bientot
-            </Chip>
-          </Surface>
-          <Surface elevation={0} style={[styles.row, { backgroundColor: theme.colors.surface }]}>
-            <Text variant="bodyMedium">Profil dietetique</Text>
-            <Chip compact icon="leaf" style={{ backgroundColor: theme.colors.surfaceVariant }}>
-              Bientot
-            </Chip>
+              Tester
+            </Button>
           </Surface>
         </View>
 

@@ -457,3 +457,15 @@ export async function setPushEnabled(enabled: boolean): Promise<void> {
     body: JSON.stringify({ enabled }),
   });
 }
+
+const TestPushResponseSchema = z.object({
+  ok: z.boolean(),
+  sent: z.number().int().nonnegative(),
+  errors: z.number().int().nonnegative(),
+});
+export type TestPushResponse = z.infer<typeof TestPushResponseSchema>;
+
+export async function sendTestPush(): Promise<TestPushResponse> {
+  const data = await request<unknown>('/api/me/push-tokens/test', { method: 'POST' });
+  return TestPushResponseSchema.parse(data);
+}

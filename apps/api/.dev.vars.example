@@ -20,3 +20,10 @@ SUPABASE_DB_URL=postgres://postgres.<ref>:<password>@<host>:5432/postgres
 # Au moins un des deux est requis pour activer la generation IA.
 # GEMINI_API_KEY=
 # GROQ_API_KEY=
+
+# Optionnel (Phase 5.4 - admin)
+# Token requis pour acceder aux endpoints /api/admin/*. Si non defini, ces
+# endpoints retournent 503 (desactives). Choisir une valeur aleatoire forte.
+# Utile pour declencher manuellement le scheduler de notifs (test des push)
+# sans attendre le cron horaire.
+# ADMIN_TOKEN=

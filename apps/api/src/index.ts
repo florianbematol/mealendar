@@ -4,6 +4,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { runScheduledNotifications } from './lib/notificationsScheduler';
 import { getServiceClient } from './lib/supabase';
+import { adminRouter } from './routes/admin';
 import { dietPlansRouter } from './routes/dietPlans';
 import { householdsRouter } from './routes/households';
 import { ingredientsRouter } from './routes/ingredients';
@@ -21,6 +22,9 @@ export type Bindings = {
   SUPABASE_JWT_SECRET?: string;
   GEMINI_API_KEY?: string;
   GROQ_API_KEY?: string;
+  /** Secret pour les endpoints admin (cf. routes/admin.ts). Si non defini,
+   * tous les endpoints admin retournent 503 (desactives). */
+  ADMIN_TOKEN?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -55,6 +59,12 @@ app.get('/health', (c) => {
 });
 
 // Routes authentifiees
+// Admin en premier : pas de requireAuth, protege par X-Admin-Token sur /admin/*.
+// Doit etre mounte avant les autres routers qui font `router.use('*', requireAuth())`,
+// car Hono partage les middlewares entre routers du meme prefix.
+app.route('/api', adminRouter);
+
+// Routes authentifiees (chacune fait `router.use('*', requireAuth())`)
 app.route('/api', householdsRouter);
 app.route('/api', recipesRouter);
 app.route('/api', planningsRouter);
