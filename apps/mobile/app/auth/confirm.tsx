@@ -2,31 +2,87 @@
  * Ecran de retour apres clic sur le lien de confirmation envoye par email.
  *
  * Le user clique sur le lien depuis sa boite mail ; le deep link
- * `mealendar:///auth/confirm?code=...` ouvre cet ecran avec un code OAuth/PKCE.
- * On echange ce code contre une session Supabase, puis on redirige vers /
- * (le RootStack se chargera de router vers (app) ou (auth) selon la session).
+ * `mealendar:///auth/confirm?...` (ou `#...`) ouvre cet ecran.
  *
- * Cas d'erreur : on affiche le message + bouton retour login.
+ * Supabase peut envoyer plusieurs formats selon le flow et le type d'email :
+ *
+ *  1. PKCE flow (newer) :
+ *     mealendar://auth/confirm?code=<oauth_code>
+ *     -> exchangeCodeForSession(code)
+ *
+ *  2. Implicit flow (default email confirm) :
+ *     mealendar://auth/confirm#access_token=<jwt>&refresh_token=<rt>&...&type=signup
+ *     -> setSession({ access_token, refresh_token })
+ *
+ *  3. OTP flow (magic link older) :
+ *     mealendar://auth/confirm?token_hash=<hash>&type=signup
+ *     -> verifyOtp({ token_hash, type })
+ *
+ *  4. Erreur (lien expire, deja utilise) :
+ *     mealendar://auth/confirm?error=...&error_description=...
+ *     ou mealendar://auth/confirm#error=...&error_description=...
+ *
+ * On supporte les 4 cas. Pour les fragments (#...), on parse via
+ * Linking.getInitialURL puisque useLocalSearchParams ne les voit pas.
  */
 import { supabase } from '@/lib/supabase';
+import * as Linking from 'expo-linking';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { ActivityIndicator, Button, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+/**
+ * Parse les params d'un deep link (query + fragment combines).
+ *
+ * `Linking.parse` retourne :
+ *   { hostname, path, queryParams: { ... } }
+ *
+ * Mais il ne capture PAS le fragment (`#key=value`). On parse manuellement
+ * la string apres le `#` si presente.
+ */
+function parseDeepLinkParams(url: string): Record<string, string> {
+  const out: Record<string, string> = {};
+
+  try {
+    const parsed = Linking.parse(url);
+    if (parsed.queryParams) {
+      for (const [k, v] of Object.entries(parsed.queryParams)) {
+        if (typeof v === 'string') out[k] = v;
+        else if (Array.isArray(v) && typeof v[0] === 'string') out[k] = v[0];
+      }
+    }
+  } catch {
+    // ignore parse error, on continue avec le fragment
+  }
+
+  // Recherche le fragment (`#...`) et parse en URLSearchParams
+  const hashIdx = url.indexOf('#');
+  if (hashIdx >= 0) {
+    const fragment = url.slice(hashIdx + 1);
+    const fragParams = new URLSearchParams(fragment);
+    for (const [k, v] of fragParams.entries()) {
+      out[k] = v;
+    }
+  }
+
+  return out;
+}
+
 export default function AuthConfirmScreen() {
   const theme = useTheme();
-  // Supabase peut renvoyer plusieurs parametres :
-  //  - code (PKCE flow)         -> exchangeCodeForSession
-  //  - token_hash + type        -> verifyOtp
-  //  - error / error_description (lien expire, etc.)
-  const params = useLocalSearchParams<{
+  // useLocalSearchParams ne capte que les query params, pas les fragments.
+  // Pour les flows Supabase Implicit (fragment access_token), on retombe
+  // sur Linking.getInitialURL.
+  const queryParams = useLocalSearchParams<{
     code?: string;
     token_hash?: string;
     type?: string;
     error?: string;
     error_description?: string;
+    access_token?: string;
+    refresh_token?: string;
   }>();
 
   const [status, setStatus] = useState<'verifying' | 'success' | 'error'>('verifying');
@@ -36,29 +92,55 @@ export default function AuthConfirmScreen() {
     let cancelled = false;
 
     async function run() {
-      // Erreur cote Supabase (ex lien expire) : on affiche l'erreur
-      if (params.error) {
+      // Recupere l'URL initiale pour parser le fragment (si present).
+      // Sur la 1ere ouverture du deep link, getInitialURL retourne l'URL
+      // complete avec query + fragment. queryParams ne capte que les query.
+      let allParams: Record<string, string | undefined> = { ...queryParams };
+      try {
+        const initialUrl = await Linking.getInitialURL();
+        if (initialUrl) {
+          const parsed = parseDeepLinkParams(initialUrl);
+          allParams = { ...parsed, ...allParams };
+        }
+      } catch (e) {
+        console.warn('[auth/confirm] getInitialURL failed', e);
+      }
+
+      console.log('[auth/confirm] resolved params keys:', Object.keys(allParams));
+
+      // Cas 4 : erreur Supabase
+      if (allParams.error) {
         if (!cancelled) {
-          setErrorMsg(params.error_description ?? params.error);
+          setErrorMsg(allParams.error_description ?? allParams.error ?? 'Erreur Supabase');
           setStatus('error');
         }
         return;
       }
 
       try {
-        if (params.code) {
-          const { error } = await supabase.auth.exchangeCodeForSession(params.code);
+        // Cas 1 : PKCE flow
+        if (allParams.code) {
+          const { error } = await supabase.auth.exchangeCodeForSession(allParams.code);
           if (error) throw error;
-        } else if (params.token_hash && params.type) {
-          // Magic link / OTP older flow
+        }
+        // Cas 2 : Implicit flow (fragment access_token + refresh_token)
+        else if (allParams.access_token && allParams.refresh_token) {
+          const { error } = await supabase.auth.setSession({
+            access_token: allParams.access_token,
+            refresh_token: allParams.refresh_token,
+          });
+          if (error) throw error;
+        }
+        // Cas 3 : OTP flow
+        else if (allParams.token_hash && allParams.type) {
           const { error } = await supabase.auth.verifyOtp({
-            token_hash: params.token_hash,
-            // biome-ignore lint/suspicious/noExplicitAny: type stricte impose par supabase mais on recoit un string
-            type: params.type as any,
+            token_hash: allParams.token_hash,
+            // biome-ignore lint/suspicious/noExplicitAny: type strict supabase
+            type: allParams.type as any,
           });
           if (error) throw error;
         } else {
-          throw new Error('Lien de confirmation invalide ou incomplet.');
+          throw new Error('Lien de confirmation invalide ou incomplet (parametres manquants).');
         }
 
         if (cancelled) return;
@@ -79,7 +161,7 @@ export default function AuthConfirmScreen() {
     return () => {
       cancelled = true;
     };
-  }, [params.code, params.token_hash, params.type, params.error, params.error_description]);
+  }, [queryParams]);
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]}>
