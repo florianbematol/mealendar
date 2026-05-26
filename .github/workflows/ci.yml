@@ -48,7 +48,7 @@ jobs:
 
       - name: Upload coverage report (api)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-api
           path: apps/api/coverage
@@ -56,7 +56,7 @@ jobs:
 
       - name: Upload coverage report (shared)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-shared
           path: packages/shared/coverage
