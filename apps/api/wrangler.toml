@@ -1,0 +1,40 @@
+name = "mealendar-api"
+main = "src/index.ts"
+compatibility_date = "2026-05-22"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "afe3e6b3b71f4ec582c148a9069d4d21"
+
+[vars]
+APP_VERSION = "0.1.0"
+
+# Cron Triggers (Phase 5.4 push notifications)
+# Format : standard cron (UTC). On declenche toutes les heures pleines.
+# Le scheduler decide ensuite quoi envoyer selon l'heure locale Paris :
+#   - 20h Paris (= 18h ou 19h UTC selon DST) : rappel veille de prepa
+#   - dimanche 18h Paris : rappel courses
+# En tournant chaque heure, on couvre les deux declenchements et les
+# ajustements DST sans configuration supplementaire.
+[triggers]
+crons = ["0 * * * *"]
+
+# Dev local : bind sur toutes les interfaces pour que le telephone (sur le meme Wi-Fi)
+# puisse atteindre le Worker via l'IP LAN du PC.
+[dev]
+ip = "0.0.0.0"
+port = 8787
+
+# Secrets :
+# - DEV LOCAL  (`wrangler dev`)    : ranger dans `.dev.vars` (gitignore).
+#                                     Voir `.dev.vars.example`.
+# - PRODUCTION (`wrangler deploy`) : `wrangler secret put <NAME>`
+#
+# Variables attendues :
+#   SUPABASE_URL              (ex : https://xxx.supabase.co)
+#   SUPABASE_ANON_KEY         (anon key publique, utilisee pour les clients par-user)
+#   SUPABASE_SERVICE_ROLE_KEY (clef admin, bypass RLS - secret strict)
+#   SUPABASE_JWT_SECRET       (HS256 secret - Settings > API > JWT Secret)
+#   GEMINI_API_KEY            (Phase 3)
+#   GROQ_API_KEY              (Phase 3, optionnel)

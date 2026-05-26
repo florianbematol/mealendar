@@ -1,0 +1,27 @@
+{
+  "name": "@mealendar/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@mealendar/shared": "workspace:*",
+    "@supabase/supabase-js": "2.106.1",
+    "hono": "4.12.22",
+    "jose": "6.2.3",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260522.1",
+    "typescript": "5.9.3",
+    "vitest": "2.1.8",
+    "wrangler": "4.94.0"
+  }
+}

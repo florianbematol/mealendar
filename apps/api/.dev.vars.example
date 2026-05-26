@@ -1,0 +1,22 @@
+# Secrets pour `wrangler dev` (lecture locale uniquement, JAMAIS commit).
+# Copier en .dev.vars dans le meme dossier et remplir.
+#
+# Equivalent local de `wrangler secret put` (qui sert pour la prod).
+# Doc : https://developers.cloudflare.com/workers/configuration/secrets/#local-development-with-secrets
+
+SUPABASE_URL=https://xxxxxxxxxxxx.supabase.co
+SUPABASE_ANON_KEY=eyJ...
+SUPABASE_SERVICE_ROLE_KEY=eyJ...
+SUPABASE_JWT_SECRET=changeme
+
+# Connection Postgres directe (utilisee uniquement par `pnpm db:push`).
+# Dashboard -> Settings -> Database -> Connection string -> URI (port 5432).
+# Le mot de passe = celui du projet Supabase (pas l'anon key).
+SUPABASE_DB_URL=postgres://postgres.<ref>:<password>@<host>:5432/postgres
+
+# Optionnels (Phase 3 LLM)
+# - GEMINI_API_KEY : recommande, https://aistudio.google.com/apikey (free tier genereux)
+# - GROQ_API_KEY   : optionnel, fallback si Gemini KO/quota, https://console.groq.com/keys
+# Au moins un des deux est requis pour activer la generation IA.
+# GEMINI_API_KEY=
+# GROQ_API_KEY=
