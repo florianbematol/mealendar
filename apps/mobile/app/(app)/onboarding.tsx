@@ -1,5 +1,5 @@
 import { useAuth } from '@/hooks/useAuth';
-import { ApiError, createHousehold, fetchWhoami, joinHousehold } from '@/lib/api';
+import { ApiError, createHousehold, joinHousehold } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import { useQueryClient } from '@tanstack/react-query';
@@ -38,7 +38,6 @@ export default function OnboardingScreen() {
   const [displayName, setDisplayName] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [debug, setDebug] = useState<string | null>(null);
 
   const onSubmit = async () => {
     if (submitting) return; // anti double-clic en plus du disabled
@@ -191,35 +190,10 @@ export default function OnboardingScreen() {
           <Divider style={styles.divider} />
 
           <View style={styles.actionsBottom}>
-            <Button
-              mode="text"
-              compact
-              onPress={async () => {
-                try {
-                  const result = await fetchWhoami();
-                  setDebug(JSON.stringify(result, null, 2));
-                } catch (e) {
-                  setDebug(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
-                }
-              }}
-            >
-              Debug : Whoami
-            </Button>
             <Button mode="text" compact onPress={onSignOut} textColor={theme.colors.error}>
               Se deconnecter
             </Button>
           </View>
-
-          {debug && (
-            <Surface
-              elevation={0}
-              style={[styles.debugBlock, { backgroundColor: theme.colors.surfaceVariant }]}
-            >
-              <Text selectable style={styles.debugText}>
-                {debug}
-              </Text>
-            </Surface>
-          )}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -290,16 +264,7 @@ const styles = StyleSheet.create({
   },
   actionsBottom: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
-  },
-  debugBlock: {
-    padding: 12,
-    borderRadius: 12,
-    marginTop: 16,
-  },
-  debugText: {
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontSize: 11,
   },
 });

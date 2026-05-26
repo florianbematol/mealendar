@@ -106,8 +106,6 @@ export default function AuthConfirmScreen() {
         console.warn('[auth/confirm] getInitialURL failed', e);
       }
 
-      console.log('[auth/confirm] resolved params keys:', Object.keys(allParams));
-
       // Cas 4 : erreur Supabase
       if (allParams.error) {
         if (!cancelled) {
