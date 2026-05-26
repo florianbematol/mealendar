@@ -16,22 +16,6 @@ export const householdsRouter = new Hono<{ Bindings: Bindings }>();
 householdsRouter.use('*', requireAuth());
 
 /**
- * GET /api/whoami
- * Endpoint de debug : retourne ce que voit Postgres pour l'auth (auth.uid, role).
- * Utile pour diagnostiquer les erreurs RLS.
- */
-householdsRouter.get('/whoami', async (c) => {
-  const auth = getAuth(c);
-  const sb = getUserClient(c.env, auth.accessToken);
-  const { data, error } = await sb.rpc('whoami');
-  return c.json({
-    fromJwt: { userId: auth.userId, email: auth.email },
-    fromPostgres: data,
-    pgError: error?.message ?? null,
-  });
-});
-
-/**
  * GET /api/me
  * Retourne l'utilisateur authentifie + ses foyers.
  */

@@ -11,11 +11,11 @@
     "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anomalyco.mealendar",
+      "bundleIdentifier": "com.smoothpanda.mealendar",
       "icon": "./assets/icon.png"
     },
     "android": {
-      "package": "com.anomalyco.mealendar",
+      "package": "com.smoothpanda.mealendar",
       "edgeToEdgeEnabled": true,
       "navigationBar": {
         "backgroundColor": "#FFFFFF",
@@ -25,7 +25,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#3F7D58"
       },
-      "permissions": ["android.permission.CAMERA", "android.permission.RECORD_AUDIO"]
+      "permissions": ["android.permission.CAMERA"]
     },
     "web": {
       "bundler": "metro",

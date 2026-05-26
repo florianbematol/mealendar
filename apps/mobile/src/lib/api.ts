@@ -107,14 +107,6 @@ export async function fetchHealth(): Promise<HealthResponse> {
   return HealthResponseSchema.parse(data);
 }
 
-/**
- * Endpoint de debug : retourne ce que voit Postgres pour l'auth (auth.uid, role).
- * Sans validation Zod (la forme est libre cote serveur).
- */
-export async function fetchWhoami(): Promise<unknown> {
-  return await request<unknown>('/api/whoami');
-}
-
 export async function fetchMe(): Promise<MeResponse> {
   const data = await request<unknown>('/api/me');
   return MeResponseSchema.parse(data);
