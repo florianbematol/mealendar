@@ -1,0 +1,8 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Recommandation Expo (SDK 54+) : utiliser hoisted node_modules pour eviter
+# les problemes de resolution avec react-native + pnpm strict.
+# https://docs.expo.dev/guides/monorepos/#package-managers-with-isolated-dependencies
+nodeLinker: hoisted

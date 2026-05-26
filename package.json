@@ -1,0 +1,40 @@
+{
+  "name": "mealendar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Application de planification de repas multi-utilisateurs avec generation LLM",
+  "packageManager": "pnpm@10.27.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "dev:api": "pnpm --filter @mealendar/api dev",
+    "dev:mobile": "pnpm --filter @mealendar/mobile start",
+    "db:push": "node scripts/db-push.mjs",
+    "db:status": "node scripts/db-push.mjs --dry-run",
+    "db:reset": "node scripts/db-push.mjs --reset",
+    "db:wipe": "node scripts/db-wipe.mjs",
+    "db:inspect": "node scripts/db-inspect.mjs",
+    "db:test-insert": "node scripts/db-test-insert.mjs",
+    "db:list-users": "node scripts/db-list-users.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "postgres": "3.4.9",
+    "typescript": "5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["@biomejs/biome", "esbuild", "workerd"],
+    "peerDependencyRules": {
+      "ignoreMissing": ["react-dom"],
+      "allowedVersions": {
+        "react-dom>react": "19"
+      }
+    }
+  }
+}
