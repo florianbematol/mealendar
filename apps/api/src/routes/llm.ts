@@ -486,11 +486,11 @@ llmRouter.post('/llm/generate-planning', async (c) => {
       date: m.date,
       slotKey: m.slotKey,
       recipeId: m.recipeId,
-      servings: memberCount * (m.coversDays ?? 1),
+      servings: memberCount * (m.coversMeals ?? 1),
       diners: [],
       locked: false,
       position: 0,
-      coversDays: m.coversDays ?? 1,
+      coversMeals: m.coversMeals ?? 1,
     }));
 
   const { error: setErr } = await sb.rpc('set_planning_meals', {

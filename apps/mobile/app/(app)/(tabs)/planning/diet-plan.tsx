@@ -3,6 +3,7 @@ import { useMyDietPlan, useUpsertMyDietPlan } from '@/hooks/useDietPlans';
 import { useMealPlan } from '@/hooks/usePlannings';
 import { ApiError } from '@/lib/api';
 import { useActiveHousehold } from '@/stores/activeHousehold';
+import { toast } from '@/stores/toast';
 import {
   DEFAULT_DIET_PLAN_TEMPLATE,
   type DietAlternative,
@@ -190,6 +191,7 @@ export default function DietPlanScreen() {
 
   const onLoadTemplate = () => {
     setDietPlan(JSON.parse(JSON.stringify(DEFAULT_DIET_PLAN_TEMPLATE)) as DietPlan);
+    toast.info("Modele charge. N'oublie pas d'enregistrer pour le sauvegarder.");
   };
 
   const onSave = async () => {

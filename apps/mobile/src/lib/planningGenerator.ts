@@ -2,19 +2,20 @@
  * Generation de planning aleatoire cote mobile.
  *
  * Strategie : pour chaque (date, slot) du planning :
- *  - Si le slot est deja locked, on le garde et on note les jours couverts
- *    (covers_days > 1 = on saute aussi le ou les jours suivants pour ce slot)
+ *  - Si le slot est deja locked, on le garde et on note les slots couverts
+ *    (coversMeals > 1 = on saute aussi les N prochains repas principaux).
  *  - Filtre les recettes compatibles (mealSlots inclus, ou aucun mealSlots specifie)
  *  - Tirage pondere : on penalise les recettes utilisees recemment (selon
  *    minDaysBetweenSameRecipe de la varietyRules)
  */
 
-import type {
-  PlannedMeal,
-  PlannedMealInput,
-  RecipeListItem,
-  SlotConfig,
-  VarietyRules,
+import {
+  type PlannedMeal,
+  type PlannedMealInput,
+  type RecipeListItem,
+  type SlotConfig,
+  type VarietyRules,
+  findCoveredSlots,
 } from '@mealendar/shared';
 import { addDays, rangeDates, weekdayOf } from './dates';
 
@@ -45,17 +46,26 @@ export function generatePlanningMeals(input: GenerateInput): PlannedMealInput[] 
   }
 
   /**
-   * Slots a skipper car couverts par un meal multi-jours.
-   * Exemple : un meal locked le 2025-01-02 dinner avec coversDays=2
-   *  -> on skip aussi 2025-01-03 dinner.
+   * Slots a skipper car couverts par un meal multi-meals locked.
+   * Exemple : un meal locked le 2026-01-02 dinner avec coversMeals=2
+   *  -> on skip aussi 2026-01-03 lunch (le prochain repas principal).
+   *
+   * On utilise findCoveredSlots() de @mealendar/shared pour la logique
+   * "prochains repas principaux" (saute petit-dej + gouter).
    */
   const coveredSlots = new Set<string>();
   for (const m of input.existingMeals) {
     if (!m.locked) continue;
-    const cd = m.coversDays ?? 1;
-    for (let i = 1; i < cd; i++) {
-      const futureDate = addDays(m.date, i);
-      coveredSlots.add(`${futureDate}|${m.slotKey}`);
+    const cm = m.coversMeals ?? 1;
+    if (cm <= 1) continue;
+    const covered = findCoveredSlots({
+      sourceDate: m.date,
+      sourceSlotKey: m.slotKey,
+      coversMeals: cm,
+      slotConfig: input.slotConfig,
+    });
+    for (const c of covered) {
+      coveredSlots.add(`${c.date}|${c.slotKey}`);
     }
   }
 
@@ -79,7 +89,7 @@ export function generatePlanningMeals(input: GenerateInput): PlannedMealInput[] 
       const lockedHere = lockedByDateSlot.get(slotKey) ?? [];
       // Si un slot est deja locked, on le garde tel quel (l'API gardera les locked)
       if (lockedHere.length > 0) return;
-      // Si le slot est couvert par un meal multi-jours precedent, on ne genere rien
+      // Si le slot est couvert par un meal multi-meals precedent, on ne genere rien
       if (coveredSlots.has(slotKey)) return;
 
       const candidates = input.recipes.filter((r) => {
@@ -131,7 +141,7 @@ export function generatePlanningMeals(input: GenerateInput): PlannedMealInput[] 
         diners: [],
         locked: false,
         position: slotIdx,
-        coversDays: 1,
+        coversMeals: 1,
       });
     });
   }

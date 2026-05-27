@@ -351,7 +351,7 @@ export type GeneratePlanningContext = {
   endDate: string;
   /** ex 2 = au moins 2 jours entre 2 occurrences de la meme recette */
   minDaysBetweenSameRecipe: number;
-  /** ex 4 = nb de personnes du foyer (sert au LLM pour servings & coversDays) */
+  /** ex 4 = nb de personnes du foyer (sert au LLM pour servings & coversMeals) */
   memberCount: number;
   /** Slots a remplir, dans l'ordre temporel */
   slots: PlanningSlotContext[];
@@ -368,7 +368,7 @@ Ton role : remplir un planning de repas en piochant UNIQUEMENT parmi la liste de
 Le JSON doit respecter exactement ce schema :
 {
   "meals": [
-    { "date": "YYYY-MM-DD", "slotKey": string, "recipeId": string-uuid ou null, "coversDays": int 1..3, "reason": string optionnel }
+    { "date": "YYYY-MM-DD", "slotKey": string, "recipeId": string-uuid ou null, "coversMeals": int 1..3, "reason": string optionnel }
   ],
   "summary": string optionnel (1-2 phrases en francais)
 }
@@ -379,11 +379,11 @@ Regles :
 - Si aucune recette ne convient pour un slot, mets "recipeId": null et un "reason" court ("aucune recette diner adaptee dans la bibliotheque").
 - Respecte "minDaysBetweenSameRecipe" : ne propose pas la meme recette a moins de N jours.
 - Si une recette est marquee dans "mealSlots" comme convenant a un slot, prefere-la pour ce slot.
-- Si tu marques "coversDays" > 1 pour un meal, NE remplis PAS le meme slot pour les jours couverts (le repas du lendemain est le reste).
+- coversMeals = nombre de repas principaux (dejeuner + dinner) couverts par ce plat, en comptant celui-ci. Defaut 1. Ex: un poulet roti dimanche soir avec coversMeals=2 couvre dimanche soir + lundi midi (le prochain repas principal). On NE couvre JAMAIS petit-dejeuner ni gouter. Si tu marques coversMeals > 1, NE remplis PAS les slots couverts (ils auront les restes).
 - Respecte les composants requis du diet plan : chaque slot liste les composants attendus avec leurs alternatives et quantites cumulees pour le foyer (ex "Proteine -> 200-300g viande OU 150g poisson").
 - Si un slot a "regimes" (vegetarian, vegan, gluten_free, lactose_free, halal, kosher, low_carb, high_protein) : la recette choisie doit OBLIGATOIREMENT respecter ces regimes (verifie via mealSlots et tags des recettes).
 - Si un slot a "allergies" : la recette choisie ne doit JAMAIS contenir un de ces aliments (ex "arachide" -> pas de cacahuetes).
-- Si "lockedRecipeId" est present pour un slot, tu DOIS reutiliser cet id et coversDays=1.
+- Si "lockedRecipeId" est present pour un slot, tu DOIS reutiliser cet id et coversMeals=1.
 - Reponds en francais pour le summary.`;
 
 function buildPlanningUserPrompt(ctx: GeneratePlanningContext): string {
