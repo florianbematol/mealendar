@@ -62,7 +62,7 @@ type PlannedMealRow = {
   locked: boolean;
   notes: string | null;
   position: number;
-  covers_days: number;
+  covers_meals: number;
 };
 
 function mapMealPlan(row: MealPlanRow): MealPlan {
@@ -107,7 +107,7 @@ function mapPlannedMeal(row: PlannedMealRow): PlannedMeal {
     locked: row.locked,
     notes: row.notes,
     position: row.position,
-    coversDays: row.covers_days ?? 1,
+    coversMeals: row.covers_meals ?? 1,
   };
 }
 
@@ -292,7 +292,7 @@ planningsRouter.put('/plannings/:id/meals', async (c) => {
       locked: m.locked,
       notes: m.notes ?? null,
       position: m.position,
-      coversDays: m.coversDays,
+      coversMeals: m.coversMeals,
     })),
     p_keep_locked: parsed.data.keepLocked,
   });
@@ -333,7 +333,7 @@ planningsRouter.patch('/planned-meals/:id', async (c) => {
   if (parsed.data.diners !== undefined) patchObj.diners = parsed.data.diners;
   if (parsed.data.locked !== undefined) patchObj.locked = parsed.data.locked;
   if (parsed.data.notes !== undefined) patchObj.notes = parsed.data.notes;
-  if (parsed.data.coversDays !== undefined) patchObj.coversDays = parsed.data.coversDays;
+  if (parsed.data.coversMeals !== undefined) patchObj.coversMeals = parsed.data.coversMeals;
 
   const { data, error } = await sb.rpc('update_planned_meal', {
     p_meal_id: id,
@@ -388,8 +388,9 @@ planningsRouter.get('/plannings/:id/shopping-list', async (c) => {
   }
 
   // Note : `servings` est la quantite reelle a produire pour ce repas.
-  // `covers_days` indique combien de jours le repas couvre, mais on n'en
-  // tient PAS compte ici : le user a deja choisi le bon `servings` (ex 8 = 4 pers x 2 j).
+  // `covers_meals` indique combien de repas le plat couvre, mais on n'en
+  // tient PAS compte ici : le user a deja choisi le bon `servings` (ex 8
+  // = 4 pers x 2 repas couverts).
   type MealMini = { recipe_id: string; servings: number };
   const mealsList = (meals ?? []) as unknown as MealMini[];
 

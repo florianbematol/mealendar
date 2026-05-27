@@ -1,5 +1,6 @@
 import { EmptyState } from '@/components/EmptyState';
 import { Topbar } from '@/components/Topbar';
+import { useMyDietPlan } from '@/hooks/useDietPlans';
 import { useCreatePlanning, useMealPlan, usePlannings } from '@/hooks/usePlannings';
 import { ApiError } from '@/lib/api';
 import { addDays, formatShortDate, startOfWeek, todayIso } from '@/lib/dates';
@@ -26,6 +27,9 @@ export default function PlanningIndexScreen() {
   const householdId = useActiveHousehold((s) => s.householdId);
   const plannings = usePlannings(householdId);
   const mealPlan = useMealPlan(householdId);
+  // Le diet plan est PERSONNEL depuis Phase 5.5 : on regarde le profil du
+  // user courant via useMyDietPlan, plus mealPlan.data?.dietPlan (deprecated).
+  const myDietPlan = useMyDietPlan(householdId);
   const createPlanning = useCreatePlanning();
   const [error, setError] = useState<string | null>(null);
 
@@ -37,14 +41,24 @@ export default function PlanningIndexScreen() {
       )
     : 0;
 
+  // Considere le diet plan configure si :
+  //  - une entree user_diet_plans existe pour ce user dans ce foyer ET
+  //  - elle a au moins un signal (regimes / allergies / goals / composants slot)
+  const dietPlanConfigured =
+    !!myDietPlan.data &&
+    (myDietPlan.data.regimes.length > 0 ||
+      myDietPlan.data.allergies.length > 0 ||
+      myDietPlan.data.goals.length > 0 ||
+      Object.values(myDietPlan.data.dietPlan.slots).some((s) => (s ?? []).length > 0));
+
   // Resume du plan alimentaire : nb de composants au total + nb de regles journalieres
-  const dietComponentsCount = mealPlan.data?.dietPlan
-    ? Object.values(mealPlan.data.dietPlan.slots).reduce(
+  const dietComponentsCount = myDietPlan.data
+    ? Object.values(myDietPlan.data.dietPlan.slots).reduce(
         (acc, comps) => acc + (comps?.length ?? 0),
         0,
       )
     : 0;
-  const dietRulesCount = mealPlan.data?.dietPlan?.dailyRules?.length ?? 0;
+  const dietRulesCount = myDietPlan.data?.dietPlan?.dailyRules?.length ?? 0;
 
   const onCreateThisWeek = async () => {
     if (!householdId) return;
@@ -107,10 +121,10 @@ export default function PlanningIndexScreen() {
         {/* Setup section : etat de configuration du foyer */}
         <SetupSection
           mealPlanConfigured={!!mealPlan.data}
-          dietPlanConfigured={!!mealPlan.data?.dietPlan}
+          dietPlanConfigured={dietPlanConfigured}
           mealPlanSummary={mealPlan.data ? `${slotsPerWeek} repas / semaine` : null}
           dietPlanSummary={
-            mealPlan.data?.dietPlan
+            dietPlanConfigured
               ? `${dietComponentsCount} composant${dietComponentsCount > 1 ? 's' : ''}${
                   dietRulesCount > 0
                     ? ` · ${dietRulesCount} regle${dietRulesCount > 1 ? 's' : ''}`

@@ -171,6 +171,25 @@ export const SLOT_KEYS = {
 } as const;
 
 /**
+ * Slots consideres comme "repas principaux" pour le calcul de coversMeals.
+ * Un repas avec coversMeals=2 couvre lui-meme + le prochain slot principal,
+ * en sautant petit-dejeuner et gouter (qui ne sont pas consideres comme
+ * principaux pour les restes).
+ *
+ * NB : on traite ici les keys par defaut. Si l'utilisateur a des slots
+ * custom (ex 'brunch', 'apero'), ils ne seront pas consideres comme
+ * principaux ; on peut etendre cette liste plus tard si necessaire.
+ */
+export const MAIN_MEAL_SLOTS: ReadonlyArray<string> = ['lunch', 'dinner'];
+
+/**
+ * Renvoie true si le slotKey est considere comme un "repas principal".
+ */
+export function isMainMealSlot(slotKey: string): boolean {
+  return MAIN_MEAL_SLOTS.includes(slotKey);
+}
+
+/**
  * Categories d'ingredients (libres mais avec quelques presets pour l'UI).
  */
 export const IngredientCategorySchema = z.enum([
@@ -814,11 +833,17 @@ export const PlannedMealSchema = z.object({
   notes: z.string().nullable(),
   position: z.number().int(),
   /**
-   * Nombre de jours d'affilee couverts par ce repas (defaut 1).
-   * Ex: 2 = on a cuisine pour 2 jours -> les slots du meme type pour
-   * les jours suivants seront sautes par l'algo de generation.
+   * Nombre de repas (au sens "principaux" : dejeuner + diner) couverts par
+   * ce repas, en comptant celui-ci. Defaut 1.
+   *
+   * Exemple : un diner avec coversMeals=2 couvre :
+   *   - le diner du jour (current)
+   *   - le prochain repas principal (typiquement dejeuner du lendemain)
+   *
+   * Les slots petit-dej / gouter sont sautes lors du calcul des slots
+   * couverts. Cf. helper findCoveredSlots() dans @mealendar/shared.
    */
-  coversDays: z.number().int().min(1).max(7).default(1),
+  coversMeals: z.number().int().min(1).max(7).default(1),
 });
 export type PlannedMeal = z.infer<typeof PlannedMealSchema>;
 
@@ -862,7 +887,7 @@ export const PlannedMealInputSchema = z.object({
   locked: z.boolean().default(false),
   notes: z.string().max(500).nullable().optional(),
   position: z.number().int().nonnegative().default(0),
-  coversDays: z.number().int().min(1).max(7).default(1),
+  coversMeals: z.number().int().min(1).max(7).default(1),
 });
 export type PlannedMealInput = z.infer<typeof PlannedMealInputSchema>;
 
@@ -879,7 +904,7 @@ export const UpdatePlannedMealInputSchema = z.object({
   diners: z.array(UuidSchema).optional(),
   locked: z.boolean().optional(),
   notes: z.string().nullable().optional(),
-  coversDays: z.number().int().min(1).max(7).optional(),
+  coversMeals: z.number().int().min(1).max(7).optional(),
 });
 export type UpdatePlannedMealInput = z.infer<typeof UpdatePlannedMealInputSchema>;
 
@@ -1022,8 +1047,12 @@ export const LlmPlanningMealSchema = z.object({
   date: z.string(), // YYYY-MM-DD
   slotKey: MealSlotKeySchema,
   recipeId: UuidSchema.nullable(),
-  /** Nombre de jours couverts (1..3). Le LLM decide quand un repas peut couvrir 2-3 j. */
-  coversDays: z.number().int().min(1).max(3).default(1),
+  /**
+   * Nombre de repas principaux (dejeuner + diner) couverts par ce repas,
+   * en comptant celui-ci. 1 = juste ce repas. 2 = ce repas + le prochain
+   * repas principal. Plage 1..3.
+   */
+  coversMeals: z.number().int().min(1).max(3).default(1),
   /** Justification courte (debug + UX si null). */
   reason: z.string().max(200).optional(),
 });
@@ -1220,4 +1249,84 @@ export function aggregateDietPlansForSlot(
 function sumNullable(a: number | null | undefined, b: number | null | undefined): number | null {
   if (a == null && b == null) return null;
   return (a ?? 0) + (b ?? 0);
+}
+
+// ============================================================================
+// Helper coversMeals : calcule les slots couverts par un repas multi-meals
+// ============================================================================
+
+/**
+ * Un slot dans le planning, identifie par sa date et son slotKey.
+ */
+export type SlotRef = {
+  date: string; // YYYY-MM-DD
+  slotKey: string;
+};
+
+/**
+ * Etant donne :
+ *  - un sourceMeal a (date, slotKey) avec coversMeals = N
+ *  - le slotConfig du foyer (jours de la semaine -> liste de slots)
+ *  - une fenetre maximale de scan (en jours)
+ *
+ * Renvoie les (N - 1) slots COUVERTS par ce repas (excluant le source lui-meme).
+ *
+ * Logique :
+ *  1. On parcourt les jours suivants (source date inclus) dans l'ordre.
+ *  2. Pour chaque jour, on prend les slots configures de ce jour dans l'ordre.
+ *  3. On ne compte que les slots "principaux" (lunch, dinner) car les
+ *     petits-dej / gouters ne sont pas des "restes" plausibles.
+ *  4. On saute le slot source (meme date + meme slot).
+ *  5. On stoppe quand on a atteint (N - 1) slots couverts.
+ *
+ * Exemples concrets (avec slotConfig standard breakfast/lunch/snack/dinner) :
+ *   - sourceSlot=dinner du Lundi, coversMeals=2 -> couvre lunch Mardi
+ *   - sourceSlot=dinner du Lundi, coversMeals=3 -> couvre lunch Mardi + dinner Mardi
+ *   - sourceSlot=lunch du Lundi, coversMeals=2 -> couvre dinner Lundi
+ *   - sourceSlot=lunch du Lundi, coversMeals=3 -> couvre dinner Lundi + lunch Mardi
+ *
+ * Les retours sont au format YYYY-MM-DD (la fonction ne fait pas d'ajustement
+ * timezone, traite la date comme un jour calendaire).
+ */
+export function findCoveredSlots(opts: {
+  sourceDate: string;
+  sourceSlotKey: string;
+  coversMeals: number;
+  slotConfig: Record<string, { key: string }[]>;
+  /** Nb max de jours a scanner devant pour trouver les slots. Defaut 7. */
+  maxScanDays?: number;
+}): SlotRef[] {
+  const { sourceDate, sourceSlotKey, coversMeals, slotConfig } = opts;
+  const maxScanDays = opts.maxScanDays ?? 7;
+  if (coversMeals <= 1) return [];
+
+  const slotsToFind = coversMeals - 1; // Le source compte deja
+  const out: SlotRef[] = [];
+  let foundSource = false;
+
+  const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+  for (let dayOffset = 0; dayOffset <= maxScanDays && out.length < slotsToFind; dayOffset++) {
+    const d = new Date(`${sourceDate}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + dayOffset);
+    const dateIso = d.toISOString().slice(0, 10);
+    const wd = weekdays[d.getUTCDay()] ?? 'monday';
+    const slotsForDay = slotConfig[wd] ?? [];
+
+    for (const slot of slotsForDay) {
+      // Saute jusqu'a depasser le slot source
+      if (!foundSource) {
+        if (dateIso === sourceDate && slot.key === sourceSlotKey) {
+          foundSource = true;
+        }
+        continue;
+      }
+      // Apres le source, on ne compte que les slots principaux
+      if (!isMainMealSlot(slot.key)) continue;
+      out.push({ date: dateIso, slotKey: slot.key });
+      if (out.length >= slotsToFind) break;
+    }
+  }
+
+  return out;
 }

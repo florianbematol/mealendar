@@ -15,7 +15,12 @@ import { WEEKDAY_LABELS, addDays, fromIsoDate, rangeDates, weekdayOf } from '@/l
 import { haptics } from '@/lib/haptics';
 import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
-import type { DietComponent, PlannedMeal, RecipeListItem } from '@mealendar/shared';
+import {
+  type DietComponent,
+  type PlannedMeal,
+  type RecipeListItem,
+  findCoveredSlots,
+} from '@mealendar/shared';
 import * as FileSystem from 'expo-file-system';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as Sharing from 'expo-sharing';
@@ -65,8 +70,8 @@ export default function PlanningDetailScreen() {
     date: string;
     slotKey: string;
   } | null>(null);
-  /** valeur courante du stepper coversDays dans le picker (1..3) */
-  const [pickerCoversDays, setPickerCoversDays] = useState<number>(1);
+  /** valeur courante du stepper coversMeals dans le picker (1..3) */
+  const [pickerCoversMeals, setPickerCoversMeals] = useState<number>(1);
   /**
    * Set des user_id concernes par le repas. Vide = tous les membres
    * (comportement par defaut pour ne pas casser l'existant).
@@ -141,24 +146,34 @@ export default function PlanningDetailScreen() {
   }, [planning.data]);
 
   /**
-   * Map des slots qui sont COUVERTS par un meal multi-jours posé un ou
-   * plusieurs jours avant. Cle = `${date}|${slotKey}`, valeur = meal source.
+   * Map des slots qui sont COUVERTS par un meal multi-meals pose plus tot.
+   * Cle = `${date}|${slotKey}`, valeur = meal source.
    *
-   * Ex : meal du 2026-01-02 dinner avec coversDays=2
-   *  -> coveredByMap['2026-01-03|dinner'] = ce meal
+   * Ex : meal du 2026-01-02 dinner avec coversMeals=2
+   *  -> coveredByMap['2026-01-03|lunch'] = ce meal (le prochain repas
+   *     principal apres le dinner du 02).
+   *
+   * Logique implementee dans findCoveredSlots() de @mealendar/shared :
+   * saute breakfast / snack qui ne sont pas des "repas principaux".
    */
   const coveredByMap = useMemo(() => {
     const map = new Map<string, PlannedMeal>();
-    if (!planning.data) return map;
+    if (!planning.data || !mealPlan.data) return map;
     for (const m of planning.data.meals) {
-      const cd = m.coversDays ?? 1;
-      if (cd <= 1) continue;
-      for (let i = 1; i < cd; i++) {
-        map.set(`${addDays(m.date, i)}|${m.slotKey}`, m);
+      const cm = m.coversMeals ?? 1;
+      if (cm <= 1) continue;
+      const covered = findCoveredSlots({
+        sourceDate: m.date,
+        sourceSlotKey: m.slotKey,
+        coversMeals: cm,
+        slotConfig: mealPlan.data.slotConfig,
+      });
+      for (const c of covered) {
+        map.set(`${c.date}|${c.slotKey}`, m);
       }
     }
     return map;
-  }, [planning.data]);
+  }, [planning.data, mealPlan.data]);
 
   const recipesById = useMemo(() => {
     const map = new Map<string, RecipeListItem>();
@@ -280,10 +295,10 @@ export default function PlanningDetailScreen() {
   const onPickRecipe = async (recipeId: string) => {
     if (!pickerTarget || !planning.data) return;
     const existing = mealsByDateSlot.get(`${pickerTarget.date}|${pickerTarget.slotKey}`)?.[0];
-    const coversDays = Math.min(3, Math.max(1, pickerCoversDays));
+    const coversMeals = Math.min(3, Math.max(1, pickerCoversMeals));
     // Effective diner count : si tableau vide -> tout le monde
     const effectiveDinerCount = pickerDiners.length > 0 ? pickerDiners.length : memberCount;
-    const servings = effectiveDinerCount * coversDays;
+    const servings = effectiveDinerCount * coversMeals;
 
     if (existing) {
       // patch existant
@@ -293,7 +308,7 @@ export default function PlanningDetailScreen() {
           input: {
             recipeId,
             customTitle: null,
-            coversDays,
+            coversMeals,
             servings,
             diners: pickerDiners,
           },
@@ -313,7 +328,7 @@ export default function PlanningDetailScreen() {
         locked: m.locked,
         notes: m.notes,
         position: m.position,
-        coversDays: m.coversDays,
+        coversMeals: m.coversMeals,
       }));
       try {
         await setMeals.mutateAsync({
@@ -328,7 +343,7 @@ export default function PlanningDetailScreen() {
               diners: pickerDiners,
               locked: false,
               position: 0,
-              coversDays,
+              coversMeals,
             },
           ],
         });
@@ -338,7 +353,7 @@ export default function PlanningDetailScreen() {
     }
     setRecipePickerOpen(false);
     setPickerTarget(null);
-    setPickerCoversDays(1);
+    setPickerCoversMeals(1);
     setPickerDiners([]);
   };
 
@@ -356,7 +371,7 @@ export default function PlanningDetailScreen() {
         locked: m.locked,
         notes: m.notes,
         position: m.position,
-        coversDays: m.coversDays,
+        coversMeals: m.coversMeals,
       }));
     try {
       await setMeals.mutateAsync({ meals: remaining, keepLocked: false });
@@ -378,21 +393,18 @@ export default function PlanningDetailScreen() {
   };
 
   /**
-   * L'utilisateur a tape sur un slot couvert par un meal multi-jours.
-   * On lui propose soit de detacher (reduire coversDays du meal source pour
-   * liberer ce slot), soit d'annuler.
+   * L'utilisateur a tape sur un slot couvert par un meal multi-meals.
+   * On lui propose soit de detacher (reduire coversMeals du meal source
+   * pour liberer ce slot), soit d'annuler.
    */
   const onPressCoveredSlot = (
     sourceMeal: PlannedMeal,
     targetDate: string,
-    _targetSlotKey: string,
+    targetSlotKey: string,
   ) => {
     const sourceWd = WEEKDAY_LABELS[weekdayOf(sourceMeal.date)];
     const sourceDateLabel = `${String(fromIsoDate(sourceMeal.date).getDate()).padStart(2, '0')}/${String(fromIsoDate(sourceMeal.date).getMonth() + 1).padStart(2, '0')}`;
-    // Nb de jours entre la source et la cible (1 = lendemain, etc.)
-    const daysAfter = Math.round(
-      (Date.parse(targetDate) - Date.parse(sourceMeal.date)) / 86_400_000,
-    );
+
     Alert.alert(
       'Repas couvert',
       `Ce creneau est couvert par le repas du ${sourceWd} ${sourceDateLabel}.`,
@@ -401,17 +413,32 @@ export default function PlanningDetailScreen() {
         {
           text: 'Liberer ce creneau',
           onPress: async () => {
-            // On reduit le coversDays du meal source pour ne plus couvrir
-            // jusqu'a la cible. Si la cible est J+1 (daysAfter=1) -> coversDays=1.
-            const newCoversDays = Math.max(1, daysAfter);
+            if (!mealPlan.data) return;
+            // On calcule l'index (1-based) du target dans les slots couverts
+            // par le meal source. Reduire coversMeals a cet index libere le
+            // target et tous ceux apres.
+            // Ex: source dinner lundi cm=3 couvre lunch mardi (idx 1) et
+            // dinner mardi (idx 2). Si target = dinner mardi -> newCm = 2.
+            const covered = findCoveredSlots({
+              sourceDate: sourceMeal.date,
+              sourceSlotKey: sourceMeal.slotKey,
+              coversMeals: sourceMeal.coversMeals,
+              slotConfig: mealPlan.data.slotConfig,
+            });
+            const targetIdx = covered.findIndex(
+              (c) => c.date === targetDate && c.slotKey === targetSlotKey,
+            );
+            // Si pas trouve (devrait pas arriver) -> fallback coversMeals=1
+            // Sinon : newCm = targetIdx + 1 (car coversMeals = nb total = source(1) + ceux avant le target)
+            const newCoversMeals = targetIdx >= 0 ? targetIdx + 1 : 1;
             const newServings =
-              sourceMeal.servings > 0 && sourceMeal.coversDays > 0
-                ? Math.round((sourceMeal.servings / sourceMeal.coversDays) * newCoversDays)
+              sourceMeal.servings > 0 && sourceMeal.coversMeals > 0
+                ? Math.round((sourceMeal.servings / sourceMeal.coversMeals) * newCoversMeals)
                 : sourceMeal.servings;
             try {
               await updateMeal.mutateAsync({
                 mealId: sourceMeal.id,
-                input: { coversDays: newCoversDays, servings: newServings },
+                input: { coversMeals: newCoversMeals, servings: newServings },
               });
             } catch (e) {
               Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
@@ -486,7 +513,7 @@ export default function PlanningDetailScreen() {
       locked: m.locked,
       notes: m.notes,
       position: m.position,
-      coversDays: m.coversDays,
+      coversMeals: m.coversMeals,
     }));
     try {
       await setMeals.mutateAsync({
@@ -501,7 +528,7 @@ export default function PlanningDetailScreen() {
             diners: [],
             locked: false,
             position: 0,
-            coversDays: 1,
+            coversMeals: 1,
           },
         ],
       });
@@ -632,7 +659,7 @@ export default function PlanningDetailScreen() {
                   const coveredRecipe = coveredBy?.recipeId
                     ? recipesById.get(coveredBy.recipeId)
                     : null;
-                  // Cas 1 : slot couvert par un meal multi-jours d'un jour anterieur
+                  // Cas 1 : slot couvert par un meal multi-meals pose plus tot
                   if (coveredBy && !meal) {
                     const sourceWd = WEEKDAY_LABELS[weekdayOf(coveredBy.date)];
                     return (
@@ -702,7 +729,7 @@ export default function PlanningDetailScreen() {
                           onPress={() => {
                             setPickerTarget({ date, slotKey: slot.key });
                             // pre-renseigne le stepper avec la valeur actuelle si meal existant
-                            setPickerCoversDays(meal?.coversDays ?? 1);
+                            setPickerCoversMeals(meal?.coversMeals ?? 1);
                             setPickerDiners(meal?.diners ?? []);
                             setRecipePickerOpen(true);
                           }}
@@ -711,7 +738,7 @@ export default function PlanningDetailScreen() {
                             // composants du diet plan pour ce slot (si dispos).
                             if (dietComponents.length === 0) {
                               setPickerTarget({ date, slotKey: slot.key });
-                              setPickerCoversDays(meal?.coversDays ?? 1);
+                              setPickerCoversMeals(meal?.coversMeals ?? 1);
                               setPickerDiners(meal?.diners ?? []);
                               setRecipePickerOpen(true);
                               return;
@@ -748,14 +775,14 @@ export default function PlanningDetailScreen() {
                                   ? (recipe?.title ?? meal.customTitle ?? '(recette inconnue)')
                                   : '+ Ajouter'}
                               </Text>
-                              {meal && meal.coversDays > 1 && (
+                              {meal && meal.coversMeals > 1 && (
                                 <Chip
                                   compact
                                   icon="silverware-fork-knife"
                                   style={styles.coversBadge}
                                   textStyle={styles.coversBadgeText}
                                 >
-                                  {`x${meal.coversDays}j`}
+                                  {`x${meal.coversMeals}`}
                                 </Chip>
                               )}
                               {meal &&
@@ -815,7 +842,7 @@ export default function PlanningDetailScreen() {
           onDismiss={() => {
             setRecipePickerOpen(false);
             setPickerTarget(null);
-            setPickerCoversDays(1);
+            setPickerCoversMeals(1);
             setPickerDiners([]);
           }}
         >
@@ -827,17 +854,17 @@ export default function PlanningDetailScreen() {
             <IconButton
               icon="minus"
               size={18}
-              disabled={pickerCoversDays <= 1}
-              onPress={() => setPickerCoversDays((v) => Math.max(1, v - 1))}
+              disabled={pickerCoversMeals <= 1}
+              onPress={() => setPickerCoversMeals((v) => Math.max(1, v - 1))}
             />
             <Text variant="titleMedium" style={{ minWidth: 56, textAlign: 'center' }}>
-              {pickerCoversDays === 1 ? '1 jour' : `${pickerCoversDays} jours`}
+              {pickerCoversMeals === 1 ? '1 repas' : `${pickerCoversMeals} repas`}
             </Text>
             <IconButton
               icon="plus"
               size={18}
-              disabled={pickerCoversDays >= 3}
-              onPress={() => setPickerCoversDays((v) => Math.min(3, v + 1))}
+              disabled={pickerCoversMeals >= 3}
+              onPress={() => setPickerCoversMeals((v) => Math.min(3, v + 1))}
             />
           </View>
           {(household.data?.members.length ?? 0) > 1 && (
@@ -921,7 +948,7 @@ export default function PlanningDetailScreen() {
               onPress={() => {
                 setRecipePickerOpen(false);
                 setPickerTarget(null);
-                setPickerCoversDays(1);
+                setPickerCoversMeals(1);
                 setPickerDiners([]);
               }}
             >
