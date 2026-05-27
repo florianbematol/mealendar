@@ -40,8 +40,16 @@ export default function TabsLayout() {
           backgroundColor: lightTheme.colors.surface,
           borderTopColor: lightTheme.colors.outlineVariant,
           height: tabBarHeight,
+          // Reserve la zone de la nav bar Android sous nos icones, mais sans
+          // pousser les icones vers le haut : on n'a PAS de paddingTop, et
+          // tabBarItemStyle gere le centrage vertical du contenu.
           paddingBottom: bottomPadding,
-          paddingTop: 8,
+        },
+        tabBarItemStyle: {
+          // Contenu (icone + label) centre dans la zone "haute" (en-dessous,
+          // c'est la zone reservee a la nav bar Android).
+          justifyContent: 'center',
+          paddingVertical: 4,
         },
         tabBarLabelStyle: {
           fontSize: 11,

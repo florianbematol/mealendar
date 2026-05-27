@@ -16,7 +16,7 @@
     },
     "android": {
       "package": "com.smoothpanda.mealendar",
-      "edgeToEdgeEnabled": true,
+      "edgeToEdgeEnabled": false,
       "navigationBar": {
         "backgroundColor": "#FFFFFF",
         "barStyle": "dark-content"
