@@ -178,6 +178,7 @@ end;
 $$;
 
 revoke all on function public.set_meals_for_range(uuid, date, date, jsonb, boolean) from public;
+revoke execute on function public.set_meals_for_range(uuid, date, date, jsonb, boolean) from anon;
 grant execute on function public.set_meals_for_range(uuid, date, date, jsonb, boolean) to authenticated;
 
 -- ============================================================================
@@ -223,6 +224,7 @@ end;
 $$;
 
 revoke all on function public.update_planned_meal(uuid, jsonb) from public;
+revoke execute on function public.update_planned_meal(uuid, jsonb) from anon;
 grant execute on function public.update_planned_meal(uuid, jsonb) to authenticated;
 
 -- ============================================================================
@@ -253,4 +255,5 @@ end;
 $$;
 
 revoke all on function public.delete_planned_meal(uuid) from public;
+revoke execute on function public.delete_planned_meal(uuid) from anon;
 grant execute on function public.delete_planned_meal(uuid) to authenticated;
