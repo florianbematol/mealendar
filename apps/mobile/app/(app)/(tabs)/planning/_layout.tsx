@@ -15,8 +15,8 @@ export default function PlanningLayout() {
       <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="meal-plan" options={{ title: 'Plan-type' }} />
       <Stack.Screen name="diet-plan" options={{ title: 'Plan alimentaire' }} />
-      <Stack.Screen name="[id]/index" options={{ title: 'Planning' }} />
-      <Stack.Screen name="[id]/shopping" options={{ title: 'Liste de courses' }} />
+      <Stack.Screen name="day/[date]" options={{ title: 'Jour' }} />
+      <Stack.Screen name="shopping" options={{ title: 'Liste de courses' }} />
     </Stack>
   );
 }

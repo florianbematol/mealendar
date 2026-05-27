@@ -215,22 +215,17 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const input = parsed.data;
   const sb = getUserClient(c.env, auth.accessToken);
 
-  // 1. Recupere le planning + ses meals
-  const { data: planning, error: planErr } = await sb
-    .from('plannings')
-    .select('id, household_id, start_date, end_date')
-    .eq('id', input.planningId)
-    .single();
-  if (planErr || !planning) {
-    return c.json({ error: 'not_found', message: 'Planning introuvable' }, 404);
+  // 1. Verifie l'appartenance + recupere les bornes
+  const { data: hh, error: hhErr } = await sb
+    .from('households')
+    .select('id')
+    .eq('id', input.householdId)
+    .maybeSingle();
+  if (hhErr || !hh) {
+    return c.json({ error: 'not_found', message: 'Foyer introuvable' }, 404);
   }
-  type PlanningRow = {
-    id: string;
-    household_id: string;
-    start_date: string;
-    end_date: string;
-  };
-  const p = planning as unknown as PlanningRow;
+  const startDate = input.dateFrom;
+  const endDate = input.dateTo;
 
   // 2. Rate limit (un seul appel LLM = 1 unit)
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
@@ -258,7 +253,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const { data: mp, error: mpErr } = await sb
     .from('meal_plans')
     .select('slot_config, variety_rules')
-    .eq('household_id', p.household_id)
+    .eq('household_id', input.householdId)
     .maybeSingle();
   if (mpErr) {
     return c.json({ error: 'db_error', message: mpErr.message }, 500);
@@ -283,7 +278,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
 
   // 3b. Charge les profils dietetiques de tous les membres du foyer
   const { data: dietPlansData, error: dpErr } = await sb.rpc('list_household_diet_plans', {
-    p_household_id: p.household_id,
+    p_household_id: input.householdId,
   });
   if (dpErr) {
     return c.json({ error: 'db_error', message: dpErr.message }, 500);
@@ -305,7 +300,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const { data: recipesRows, error: recErr } = await sb
     .from('recipes')
     .select('id, title, servings, meal_slots, diet_tags, description')
-    .eq('household_id', p.household_id)
+    .eq('household_id', input.householdId)
     .order('created_at', { ascending: false })
     .limit(150);
   if (recErr) {
@@ -337,11 +332,13 @@ llmRouter.post('/llm/generate-planning', async (c) => {
     );
   }
 
-  // 5. Meals deja presents (pour les locked + indication varieties)
+  // 5. Meals deja presents dans la fenetre (pour les locked + variete)
   const { data: mealsRows, error: mealsErr } = await sb
     .from('planned_meals')
     .select('date, slot_key, recipe_id, locked')
-    .eq('planning_id', p.id);
+    .eq('household_id', input.householdId)
+    .gte('date', startDate)
+    .lte('date', endDate);
   if (mealsErr) {
     return c.json({ error: 'db_error', message: mealsErr.message }, 500);
   }
@@ -362,14 +359,14 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const { data: members, error: memErr } = await sb
     .from('household_members')
     .select('user_id', { count: 'exact', head: false })
-    .eq('household_id', p.household_id);
+    .eq('household_id', input.householdId);
   const memberCount = memErr ? 4 : Math.max(1, (members ?? []).length);
 
   // 7. Construit la liste des slots a remplir (date x slotKey du plan-type)
   //    en utilisant rangeDates + weekdayOf, et en agregeant les diet plans
   //    de tous les membres pour chaque slot.
   const { rangeDates, weekdayOf } = await import('../lib/dates');
-  const dates = rangeDates(p.start_date, p.end_date);
+  const dates = rangeDates(startDate, endDate);
   const slotsToFill: GeneratePlanningContext['slots'] = [];
 
   // Construit les UserDietPlan minimaux pour aggregateDietPlansForSlot.
@@ -378,7 +375,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
     id: m.userId,
     userId: m.userId,
     userEmail: null,
-    householdId: p.household_id,
+    householdId: input.householdId,
     dietPlan: (m.dietPlan ?? {
       slots: {},
       dailyRules: [],
@@ -426,8 +423,8 @@ llmRouter.post('/llm/generate-planning', async (c) => {
 
   // 8. Appel LLM
   const ctx: GeneratePlanningContext = {
-    startDate: p.start_date,
-    endDate: p.end_date,
+    startDate: startDate,
+    endDate: endDate,
     minDaysBetweenSameRecipe: mealPlan.variety_rules?.minDaysBetweenSameRecipe ?? 2,
     memberCount,
     slots: slotsToFill,
@@ -456,10 +453,12 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   }
 
   // 9. Audit
-  const promptHash = await sha256Hex(`planning:${p.id}:${slotsToFill.length}`);
+  const promptHash = await sha256Hex(
+    `planning:${input.householdId}:${startDate}:${endDate}:${slotsToFill.length}`,
+  );
   void sb
     .rpc('record_llm_usage', {
-      p_household_id: p.household_id,
+      p_household_id: input.householdId,
       p_kind: 'planning',
       p_model: outcome.model,
       p_prompt_hash: promptHash,
@@ -493,13 +492,15 @@ llmRouter.post('/llm/generate-planning', async (c) => {
       coversMeals: m.coversMeals ?? 1,
     }));
 
-  const { error: setErr } = await sb.rpc('set_planning_meals', {
-    p_planning_id: p.id,
+  const { error: setErr } = await sb.rpc('set_meals_for_range', {
+    p_household_id: input.householdId,
+    p_date_from: startDate,
+    p_date_to: endDate,
     p_meals: finalMeals,
     p_keep_locked: input.keepLocked,
   });
   if (setErr) {
-    console.error('[llm/generate-planning] set_planning_meals failed', setErr);
+    console.error('[llm/generate-planning] set_meals_for_range failed', setErr);
     return c.json({ error: 'db_error', message: setErr.message }, 500);
   }
 

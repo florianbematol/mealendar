@@ -2,13 +2,15 @@ import { OnboardingChecklist } from '@/components/OnboardingChecklist';
 import { Topbar } from '@/components/Topbar';
 import { useAuth } from '@/hooks/useAuth';
 import { useMe } from '@/hooks/useMe';
-import { usePlannings } from '@/hooks/usePlannings';
+import { useMealsRange } from '@/hooks/usePlannings';
 import { useRecipes } from '@/hooks/useRecipes';
 import { ApiError, fetchHealth } from '@/lib/api';
+import { addDays, startOfWeek, todayIso } from '@/lib/dates';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useQuery } from '@tanstack/react-query';
 import { router } from 'expo-router';
+import { useMemo } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
@@ -27,7 +29,15 @@ export default function HomeScreen() {
   const me = useMe(!!session);
   const householdId = useActiveHousehold((s) => s.householdId);
   const recipes = useRecipes(householdId);
-  const plannings = usePlannings(householdId);
+
+  // Fenetre "cette semaine" (lundi -> dimanche) pour afficher les repas
+  // planifies en cours.
+  const weekRange = useMemo(() => {
+    const today = todayIso();
+    const start = startOfWeek(today);
+    return { from: start, to: addDays(start, 6) };
+  }, []);
+  const meals = useMealsRange(householdId, weekRange.from, weekRange.to);
 
   const greetingName = (() => {
     const m = me.data?.households.find((h) => h.id === householdId);
@@ -36,7 +46,8 @@ export default function HomeScreen() {
   })();
 
   const recipeCount = recipes.data?.items.length ?? 0;
-  const activePlanning = plannings.data?.find((p) => p.status === 'active') ?? null;
+  const weekMealsCount = meals.data?.meals.length ?? 0;
+  const todayMealsCount = (meals.data?.meals ?? []).filter((m) => m.date === todayIso()).length;
 
   return (
     <SafeAreaView
@@ -61,12 +72,12 @@ export default function HomeScreen() {
             refreshing={
               (me.isFetching && !me.isPending) ||
               (recipes.isFetching && !recipes.isPending) ||
-              (plannings.isFetching && !plannings.isPending)
+              (meals.isFetching && !meals.isPending)
             }
             onRefresh={() => {
               void me.refetch();
               void recipes.refetch();
-              void plannings.refetch();
+              void meals.refetch();
             }}
             tintColor={theme.colors.primary}
           />
@@ -108,11 +119,16 @@ export default function HomeScreen() {
           <ModuleTile
             icon="silverware-fork-knife"
             title="Repas"
-            count={activePlanning ? 'Actif' : '0'}
-            subtitle="Cette semaine"
+            count={meals.isPending ? '—' : String(todayMealsCount)}
+            subtitle="Aujourd'hui"
             color={theme.colors.primary}
             bg={theme.colors.primaryContainer}
-            onPress={() => router.push('/(app)/(tabs)/planning')}
+            onPress={() =>
+              router.push({
+                pathname: '/(app)/(tabs)/planning/day/[date]',
+                params: { date: todayIso() },
+              })
+            }
           />
           <ModuleTile
             icon="book-open-variant"
@@ -131,9 +147,10 @@ export default function HomeScreen() {
             color={theme.colors.tertiary}
             bg={theme.colors.tertiaryContainer}
             onPress={() =>
-              activePlanning
-                ? router.push(`/(app)/(tabs)/planning/${activePlanning.id}/shopping`)
-                : router.push('/(app)/(tabs)/planning')
+              router.push({
+                pathname: '/(app)/(tabs)/planning/shopping',
+                params: { from: weekRange.from, to: weekRange.to },
+              })
             }
           />
           <ModuleTile
@@ -151,17 +168,13 @@ export default function HomeScreen() {
         {/* Section : Cette semaine */}
         <SectionHeader
           title="Cette semaine"
-          actionLabel={activePlanning ? 'Voir' : 'Creer'}
-          onAction={() =>
-            activePlanning
-              ? router.push(`/(app)/(tabs)/planning/${activePlanning.id}`)
-              : router.push('/(app)/(tabs)/planning')
-          }
+          actionLabel="Voir"
+          onAction={() => router.push('/(app)/(tabs)/planning')}
         />
-        {activePlanning ? (
+        {weekMealsCount > 0 ? (
           <TouchableRipple
             borderless
-            onPress={() => router.push(`/(app)/(tabs)/planning/${activePlanning.id}`)}
+            onPress={() => router.push('/(app)/(tabs)/planning')}
             style={[styles.weekCard, { backgroundColor: theme.colors.surface }]}
           >
             <View style={styles.weekCardInner}>
@@ -177,13 +190,13 @@ export default function HomeScreen() {
               </Surface>
               <View style={{ flex: 1 }}>
                 <Text variant="titleMedium" style={styles.weekTitle}>
-                  {activePlanning.name}
+                  {weekMealsCount} repas planifie{weekMealsCount > 1 ? 's' : ''}
                 </Text>
                 <Text
                   variant="bodySmall"
                   style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
                 >
-                  Du {activePlanning.startDate} au {activePlanning.endDate}
+                  Du {weekRange.from} au {weekRange.to}
                 </Text>
               </View>
               <MaterialCommunityIcons
@@ -200,13 +213,13 @@ export default function HomeScreen() {
           >
             <Text style={styles.placeholderEmoji}>📅</Text>
             <Text variant="titleMedium" style={styles.placeholderTitle}>
-              Pas encore de planning
+              Pas encore de repas cette semaine
             </Text>
             <Text
               variant="bodySmall"
               style={[styles.placeholderBody, { color: theme.colors.onSurfaceVariant }]}
             >
-              Composez vos repas de la semaine, ou laissez l'IA proposer un menu equilibre.
+              Ouvrez le calendrier pour planifier vos repas, ou laissez l'IA proposer un menu.
             </Text>
           </Surface>
         )}
