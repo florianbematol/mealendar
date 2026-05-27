@@ -1,20 +1,37 @@
-import { EmptyState } from '@/components/EmptyState';
 import { Topbar } from '@/components/Topbar';
 import { useMyDietPlan } from '@/hooks/useDietPlans';
-import { useCreatePlanning, useMealPlan, usePlannings } from '@/hooks/usePlannings';
+import {
+  useGeneratePlanningWithLlm,
+  useMealPlan,
+  useMealsRange,
+  useSetMealsRange,
+} from '@/hooks/usePlannings';
+import { useRecipes } from '@/hooks/useRecipes';
 import { ApiError } from '@/lib/api';
-import { addDays, formatShortDate, startOfWeek, todayIso } from '@/lib/dates';
+import {
+  WEEKDAYS,
+  WEEKDAY_LABELS,
+  addMonths,
+  endOfMonth,
+  formatMonthYear,
+  isSameMonth,
+  monthGrid,
+  startOfMonth,
+  startOfWeek,
+  todayIso,
+  weekDates,
+} from '@/lib/dates';
+import { haptics } from '@/lib/haptics';
+import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
-import type { Planning } from '@mealendar/shared';
 import { router } from 'expo-router';
-import { useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { useMemo, useState } from 'react';
+import { Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Button,
-  Chip,
-  HelperText,
   IconButton,
+  SegmentedButtons,
   Surface,
   Text,
   TouchableRipple,
@@ -22,28 +39,62 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+type ViewMode = 'month' | 'week';
+
 export default function PlanningIndexScreen() {
   const theme = useTheme();
   const householdId = useActiveHousehold((s) => s.householdId);
-  const plannings = usePlannings(householdId);
   const mealPlan = useMealPlan(householdId);
-  // Le diet plan est PERSONNEL depuis Phase 5.5 : on regarde le profil du
-  // user courant via useMyDietPlan, plus mealPlan.data?.dietPlan (deprecated).
   const myDietPlan = useMyDietPlan(householdId);
-  const createPlanning = useCreatePlanning();
-  const [error, setError] = useState<string | null>(null);
+  const recipes = useRecipes(householdId);
 
-  // Resume du plan-type : nb de slots configures sur la semaine
+  const [viewMode, setViewMode] = useState<ViewMode>('month');
+  /** Date de reference pour calculer la fenetre affichee. */
+  const [refDate, setRefDate] = useState<string>(todayIso());
+
+  // ---------------------------------------------------------------------------
+  // Calcul de la fenetre [from, to] selon viewMode + refDate
+  // ---------------------------------------------------------------------------
+  const window = useMemo(() => {
+    if (viewMode === 'week') {
+      const dates = weekDates(refDate);
+      return {
+        from: dates[0] as string,
+        to: dates[dates.length - 1] as string,
+        cells: dates,
+      };
+    }
+    // month : grille de 6 semaines (42 cases) lundi-aligne
+    const cells = monthGrid(refDate);
+    return {
+      from: cells[0] as string,
+      to: cells[cells.length - 1] as string,
+      cells,
+    };
+  }, [viewMode, refDate]);
+
+  const meals = useMealsRange(householdId, window.from, window.to);
+  const setMeals = useSetMealsRange(householdId ?? '');
+  const generateLlm = useGeneratePlanningWithLlm(householdId ?? '');
+
+  // ---------------------------------------------------------------------------
+  // Index : nb de meals par date (pour le badge de chaque cellule)
+  // ---------------------------------------------------------------------------
+  const mealCountByDate = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const m of meals.data?.meals ?? []) {
+      map.set(m.date, (map.get(m.date) ?? 0) + 1);
+    }
+    return map;
+  }, [meals.data]);
+
+  // ---------------------------------------------------------------------------
+  // Setup state (reutilise la SetupSection existante)
+  // ---------------------------------------------------------------------------
   const slotsPerWeek = mealPlan.data
-    ? Object.values(mealPlan.data.slotConfig).reduce(
-        (acc, daySlots) => acc + (daySlots?.length ?? 0),
-        0,
-      )
+    ? Object.values(mealPlan.data.slotConfig).reduce((acc, ds) => acc + (ds?.length ?? 0), 0)
     : 0;
 
-  // Considere le diet plan configure si :
-  //  - une entree user_diet_plans existe pour ce user dans ce foyer ET
-  //  - elle a au moins un signal (regimes / allergies / goals / composants slot)
   const dietPlanConfigured =
     !!myDietPlan.data &&
     (myDietPlan.data.regimes.length > 0 ||
@@ -51,7 +102,6 @@ export default function PlanningIndexScreen() {
       myDietPlan.data.goals.length > 0 ||
       Object.values(myDietPlan.data.dietPlan.slots).some((s) => (s ?? []).length > 0));
 
-  // Resume du plan alimentaire : nb de composants au total + nb de regles journalieres
   const dietComponentsCount = myDietPlan.data
     ? Object.values(myDietPlan.data.dietPlan.slots).reduce(
         (acc, comps) => acc + (comps?.length ?? 0),
@@ -60,26 +110,152 @@ export default function PlanningIndexScreen() {
     : 0;
   const dietRulesCount = myDietPlan.data?.dietPlan?.dailyRules?.length ?? 0;
 
-  const onCreateThisWeek = async () => {
-    if (!householdId) return;
-    setError(null);
-    const start = startOfWeek(todayIso());
-    const end = addDays(start, 6);
+  // ---------------------------------------------------------------------------
+  // Actions de generation sur la fenetre courante
+  // ---------------------------------------------------------------------------
+  const onGenerateRandom = async () => {
+    if (!householdId || !mealPlan.data) {
+      Alert.alert(
+        'Plan-type requis',
+        "Configurez d'abord votre plan-type pour generer des repas.",
+        [
+          { text: 'Plus tard', style: 'cancel' },
+          { text: 'Configurer', onPress: () => router.push('/(app)/(tabs)/planning/meal-plan') },
+        ],
+      );
+      return;
+    }
+    if ((recipes.data?.items.length ?? 0) === 0) {
+      Alert.alert(
+        'Aucune recette',
+        'Ajoutez au moins quelques recettes a votre bibliotheque pour pouvoir generer.',
+      );
+      return;
+    }
+    const generated = generatePlanningMeals({
+      startDate: window.from,
+      endDate: window.to,
+      slotConfig: mealPlan.data.slotConfig,
+      recipes: recipes.data?.items ?? [],
+      existingMeals: meals.data?.meals ?? [],
+      varietyRules: mealPlan.data.varietyRules,
+      defaultServings: 4,
+    });
     try {
-      const p = await createPlanning.mutateAsync({
-        householdId,
-        startDate: start,
-        endDate: end,
-        mealPlanId: mealPlan.data?.id ?? null,
-        name: `Semaine du ${formatShortDate(start)}`,
+      await setMeals.mutateAsync({
+        dateFrom: window.from,
+        dateTo: window.to,
+        meals: generated,
+        keepLocked: true,
       });
-      router.push(`/(app)/(tabs)/planning/${p.id}`);
+      haptics.success();
     } catch (e) {
-      if (e instanceof ApiError) setError(`${e.status} - ${e.message}`);
-      else setError(e instanceof Error ? e.message : 'Erreur inconnue');
+      haptics.error();
+      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
     }
   };
 
+  const onGenerateLlm = async () => {
+    if (!householdId || !mealPlan.data) {
+      Alert.alert('Plan-type requis', "Configurez d'abord votre plan-type.");
+      return;
+    }
+    if ((recipes.data?.items.length ?? 0) === 0) {
+      Alert.alert(
+        'Aucune recette',
+        "Ajoutez au moins quelques recettes a votre bibliotheque avant de demander a l'IA.",
+      );
+      return;
+    }
+    Alert.alert(
+      "Generer avec l'IA ?",
+      `L'IA va planifier les repas du ${formatRangeLabel(window.from, window.to)}. Consomme 1 unite de quota LLM.`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Generer',
+          onPress: async () => {
+            try {
+              const res = await generateLlm.mutateAsync({
+                householdId,
+                dateFrom: window.from,
+                dateTo: window.to,
+                keepLocked: true,
+              });
+              haptics.success();
+              const skippedTxt =
+                res.skipped > 0
+                  ? ` ${res.skipped} slot${res.skipped > 1 ? 's' : ''} non rempli${res.skipped > 1 ? 's' : ''}.`
+                  : '';
+              Alert.alert(
+                'Repas generes',
+                `${res.filled} repas planifie${res.filled > 1 ? 's' : ''}.${skippedTxt}`,
+              );
+            } catch (e) {
+              haptics.error();
+              if (e instanceof ApiError) {
+                Alert.alert('Erreur IA', `${e.status} - ${e.message}`);
+              } else {
+                Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+              }
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const onClearWindow = async () => {
+    if (!householdId) return;
+    Alert.alert(
+      'Tout effacer',
+      `Supprime tous les repas du ${formatRangeLabel(window.from, window.to)} (sauf les verrouilles).`,
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Effacer',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await setMeals.mutateAsync({
+                dateFrom: window.from,
+                dateTo: window.to,
+                meals: [],
+                keepLocked: true,
+              });
+            } catch (e) {
+              Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // Navigation periode prev/next
+  // ---------------------------------------------------------------------------
+  const onPrev = () => {
+    if (viewMode === 'week') setRefDate((d) => addDaysSafe(d, -7));
+    else setRefDate((d) => addMonths(d, -1));
+  };
+  const onNext = () => {
+    if (viewMode === 'week') setRefDate((d) => addDaysSafe(d, 7));
+    else setRefDate((d) => addMonths(d, 1));
+  };
+  const onToday = () => setRefDate(todayIso());
+
+  const headerLabel = useMemo(() => {
+    if (viewMode === 'week') {
+      const start = startOfWeek(refDate);
+      return formatRangeLabel(start, addDaysSafe(start, 6));
+    }
+    return formatMonthYear(refDate);
+  }, [viewMode, refDate]);
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
     <SafeAreaView
       style={[styles.safe, { backgroundColor: theme.colors.background }]}
@@ -87,12 +263,25 @@ export default function PlanningIndexScreen() {
     >
       <Topbar
         right={
-          <IconButton
-            icon="cog-outline"
-            size={22}
-            onPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
-            iconColor={theme.colors.onSurfaceVariant}
-          />
+          <View style={{ flexDirection: 'row' }}>
+            <IconButton
+              icon="cart-outline"
+              size={22}
+              onPress={() =>
+                router.push({
+                  pathname: '/(app)/(tabs)/planning/shopping',
+                  params: { from: window.from, to: window.to },
+                })
+              }
+              iconColor={theme.colors.onSurfaceVariant}
+            />
+            <IconButton
+              icon="cog-outline"
+              size={22}
+              onPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
+              iconColor={theme.colors.onSurfaceVariant}
+            />
+          </View>
         }
       />
 
@@ -100,9 +289,9 @@ export default function PlanningIndexScreen() {
         contentContainerStyle={styles.container}
         refreshControl={
           <RefreshControl
-            refreshing={plannings.isFetching && !plannings.isPending}
+            refreshing={meals.isFetching && !meals.isPending}
             onRefresh={() => {
-              void plannings.refetch();
+              void meals.refetch();
               void mealPlan.refetch();
             }}
             tintColor={theme.colors.primary}
@@ -114,11 +303,11 @@ export default function PlanningIndexScreen() {
             Planning
           </Text>
           <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-            Composez votre semaine ou laissez la magie operer.
+            Tapez un jour pour planifier les repas.
           </Text>
         </View>
 
-        {/* Setup section : etat de configuration du foyer */}
+        {/* Setup checklist (semaine type + plan alimentaire) */}
         <SetupSection
           mealPlanConfigured={!!mealPlan.data}
           dietPlanConfigured={dietPlanConfigured}
@@ -136,49 +325,86 @@ export default function PlanningIndexScreen() {
           onDietPlanPress={() => router.push('/(app)/(tabs)/planning/diet-plan')}
         />
 
-        {/* Action principale */}
-        <Button
-          mode="contained"
-          icon="calendar-plus"
-          onPress={onCreateThisWeek}
-          loading={createPlanning.isPending}
-          disabled={createPlanning.isPending}
-          style={styles.createBtn}
-          contentStyle={styles.createBtnContent}
-        >
-          Nouveau planning - Cette semaine
-        </Button>
+        {/* Toggle vue + navigation periode */}
+        <View style={styles.toolbarRow}>
+          <SegmentedButtons
+            value={viewMode}
+            onValueChange={(v) => setViewMode(v as ViewMode)}
+            density="small"
+            style={{ flex: 1 }}
+            buttons={[
+              { value: 'month', label: 'Mois', icon: 'calendar-month-outline' },
+              { value: 'week', label: 'Semaine', icon: 'calendar-week-outline' },
+            ]}
+          />
+        </View>
+        <View style={styles.navRow}>
+          <IconButton icon="chevron-left" onPress={onPrev} />
+          <TouchableRipple onPress={onToday} style={{ flex: 1 }} borderless>
+            <Text variant="titleMedium" style={styles.navLabel}>
+              {headerLabel}
+            </Text>
+          </TouchableRipple>
+          <IconButton icon="chevron-right" onPress={onNext} />
+        </View>
 
-        {error && (
-          <HelperText type="error" visible>
-            {error}
-          </HelperText>
+        {meals.isPending ? (
+          <View style={styles.loaderRow}>
+            <ActivityIndicator size="small" color={theme.colors.primary} />
+          </View>
+        ) : viewMode === 'month' ? (
+          <MonthGrid
+            cells={window.cells}
+            refDate={refDate}
+            mealCountByDate={mealCountByDate}
+            onPressCell={(date) =>
+              router.push({ pathname: '/(app)/(tabs)/planning/day/[date]', params: { date } })
+            }
+          />
+        ) : (
+          <WeekList
+            cells={window.cells}
+            mealCountByDate={mealCountByDate}
+            onPressCell={(date) =>
+              router.push({ pathname: '/(app)/(tabs)/planning/day/[date]', params: { date } })
+            }
+          />
         )}
 
-        {/* Liste des plannings existants */}
-        <View style={styles.listSection}>
-          <Text variant="labelLarge" style={styles.sectionTitle}>
-            Mes plannings
-          </Text>
-          {plannings.isPending && (
-            <View style={styles.loaderRow}>
-              <ActivityIndicator size="small" color={theme.colors.primary} />
-            </View>
-          )}
-          {plannings.isSuccess && plannings.data.length === 0 && (
-            <EmptyState
-              icon="calendar-blank"
-              title="Pas encore de planning"
-              description="Creez votre premier planning pour la semaine et generez automatiquement les repas a partir de vos recettes."
-              cta={{
-                label: 'Creer cette semaine',
-                icon: 'calendar-plus',
-                onPress: onCreateThisWeek,
-              }}
-            />
-          )}
-          {plannings.isSuccess &&
-            plannings.data.map((p) => <PlanningRow key={p.id} planning={p} />)}
+        {/* Actions sur la fenetre courante */}
+        <View style={styles.actionsRow}>
+          <Button
+            mode="contained"
+            icon="dice-multiple-outline"
+            onPress={onGenerateRandom}
+            loading={setMeals.isPending && !generateLlm.isPending}
+            disabled={setMeals.isPending || generateLlm.isPending}
+            style={styles.flexBtn}
+            contentStyle={styles.btnContent}
+          >
+            Aleatoire
+          </Button>
+          <Button
+            mode="contained-tonal"
+            icon="auto-fix"
+            onPress={onGenerateLlm}
+            loading={generateLlm.isPending}
+            disabled={setMeals.isPending || generateLlm.isPending}
+            style={styles.flexBtn}
+            contentStyle={styles.btnContent}
+          >
+            IA
+          </Button>
+          <Button
+            mode="outlined"
+            icon="delete-sweep-outline"
+            onPress={onClearWindow}
+            disabled={setMeals.isPending || generateLlm.isPending}
+            style={styles.flexBtn}
+            contentStyle={styles.btnContent}
+          >
+            Effacer
+          </Button>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -186,12 +412,204 @@ export default function PlanningIndexScreen() {
 }
 
 // ============================================================================
-// SetupSection : etat de configuration du foyer (semaine type + plan alimentaire)
-//
-// 2 modes selon l'etat :
-//  - "fresh" (rien configure) : grand encart accueillant avec checklist visuelle
-//                                qui guide l'utilisateur dans le setup
-//  - "ready" (semaine type OK) : ligne discrete avec resumes et lien Modifier
+// MonthGrid : 7 colonnes (lun-dim) x 6 lignes
+// ============================================================================
+function MonthGrid({
+  cells,
+  refDate,
+  mealCountByDate,
+  onPressCell,
+}: {
+  cells: string[];
+  refDate: string;
+  mealCountByDate: Map<string, number>;
+  onPressCell: (date: string) => void;
+}) {
+  const theme = useTheme();
+  const today = todayIso();
+  return (
+    <View style={styles.monthGrid}>
+      {/* Header weekdays */}
+      <View style={styles.monthRow}>
+        {WEEKDAYS.map((wd) => (
+          <View key={wd} style={styles.monthHeaderCell}>
+            <Text
+              variant="labelSmall"
+              style={{
+                color: theme.colors.onSurfaceVariant,
+                fontWeight: '700',
+                letterSpacing: 0.5,
+              }}
+            >
+              {WEEKDAY_LABELS[wd].slice(0, 3).toUpperCase()}
+            </Text>
+          </View>
+        ))}
+      </View>
+      {/* 6 rows of 7 cells */}
+      {Array.from({ length: 6 }).map((_, rowIdx) => {
+        const rowCells = cells.slice(rowIdx * 7, rowIdx * 7 + 7);
+        const rowKey = rowCells[0] ?? `row-${rowIdx}`;
+        return (
+          <View key={rowKey} style={styles.monthRow}>
+            {rowCells.map((date) => {
+              const inMonth = isSameMonth(date, refDate);
+              const isToday = date === today;
+              const count = mealCountByDate.get(date) ?? 0;
+              return (
+                <TouchableRipple
+                  key={date}
+                  onPress={() => onPressCell(date)}
+                  borderless
+                  style={[
+                    styles.monthCell,
+                    {
+                      backgroundColor: isToday
+                        ? theme.colors.primaryContainer
+                        : inMonth
+                          ? theme.colors.surface
+                          : 'transparent',
+                    },
+                  ]}
+                >
+                  <View style={styles.monthCellInner}>
+                    <Text
+                      variant="bodyMedium"
+                      style={{
+                        fontWeight: isToday ? '800' : '600',
+                        color: isToday
+                          ? theme.colors.onPrimaryContainer
+                          : inMonth
+                            ? theme.colors.onSurface
+                            : theme.colors.onSurfaceVariant,
+                        opacity: inMonth ? 1 : 0.45,
+                      }}
+                    >
+                      {Number(date.slice(8, 10))}
+                    </Text>
+                    {count > 0 && (
+                      <View
+                        style={[
+                          styles.cellBadge,
+                          {
+                            backgroundColor: isToday
+                              ? theme.colors.onPrimaryContainer
+                              : theme.colors.primary,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.cellBadgeText,
+                            {
+                              color: isToday
+                                ? theme.colors.primaryContainer
+                                : theme.colors.onPrimary,
+                            },
+                          ]}
+                        >
+                          {count}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </TouchableRipple>
+              );
+            })}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+// ============================================================================
+// WeekList : 7 lignes verticales avec emoji + nb meals
+// ============================================================================
+function WeekList({
+  cells,
+  mealCountByDate,
+  onPressCell,
+}: {
+  cells: string[];
+  mealCountByDate: Map<string, number>;
+  onPressCell: (date: string) => void;
+}) {
+  const theme = useTheme();
+  const today = todayIso();
+  return (
+    <View style={{ gap: 6 }}>
+      {cells.map((date) => {
+        const isToday = date === today;
+        const count = mealCountByDate.get(date) ?? 0;
+        const wd = WEEKDAYS[(new Date(date).getDay() + 6) % 7] as (typeof WEEKDAYS)[number];
+        return (
+          <TouchableRipple
+            key={date}
+            onPress={() => onPressCell(date)}
+            borderless
+            style={[
+              styles.weekRow,
+              {
+                backgroundColor: isToday ? theme.colors.primaryContainer : theme.colors.surface,
+              },
+            ]}
+          >
+            <View style={styles.weekRowInner}>
+              <Surface
+                elevation={0}
+                style={[
+                  styles.weekDayBubble,
+                  {
+                    backgroundColor: isToday
+                      ? theme.colors.onPrimaryContainer
+                      : theme.colors.surfaceVariant,
+                  },
+                ]}
+              >
+                <Text
+                  variant="labelSmall"
+                  style={{
+                    color: isToday ? theme.colors.primaryContainer : theme.colors.onSurfaceVariant,
+                    fontWeight: '800',
+                  }}
+                >
+                  {WEEKDAY_LABELS[wd].slice(0, 3).toUpperCase()}
+                </Text>
+                <Text
+                  variant="titleMedium"
+                  style={{
+                    color: isToday ? theme.colors.primaryContainer : theme.colors.onSurface,
+                    fontWeight: '800',
+                  }}
+                >
+                  {Number(date.slice(8, 10))}
+                </Text>
+              </Surface>
+              <View style={{ flex: 1 }}>
+                <Text variant="titleMedium" style={{ fontWeight: '700' }}>
+                  {WEEKDAY_LABELS[wd]}
+                </Text>
+                <Text
+                  variant="bodySmall"
+                  style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
+                >
+                  {count === 0
+                    ? 'Aucun repas planifie'
+                    : `${count} repas planifie${count > 1 ? 's' : ''}`}
+                </Text>
+              </View>
+              <Text style={[styles.weekChevron, { color: theme.colors.onSurfaceVariant }]}>›</Text>
+            </View>
+          </TouchableRipple>
+        );
+      })}
+    </View>
+  );
+}
+
+// ============================================================================
+// SetupSection (extrait de l'ancien index, identique)
 // ============================================================================
 function SetupSection({
   mealPlanConfigured,
@@ -210,7 +628,6 @@ function SetupSection({
 }) {
   const theme = useTheme();
 
-  // Compact : tout est configure -> ligne discrete avec 2 chips et acces Modifier
   if (mealPlanConfigured && dietPlanConfigured) {
     return (
       <Surface
@@ -241,13 +658,6 @@ function SetupSection({
               {dietPlanSummary}
             </Text>
           </View>
-          <IconButton
-            icon="cog-outline"
-            size={20}
-            onPress={onMealPlanPress}
-            iconColor={theme.colors.onSurfaceVariant}
-            style={styles.compactCog}
-          />
         </View>
         <View style={styles.compactActions}>
           <Button mode="text" compact onPress={onMealPlanPress}>
@@ -261,7 +671,6 @@ function SetupSection({
     );
   }
 
-  // Fresh : checklist guidante
   const totalSteps = 2;
   const doneSteps = (mealPlanConfigured ? 1 : 0) + (dietPlanConfigured ? 1 : 0);
   const progressPct = (doneSteps / totalSteps) * 100;
@@ -289,7 +698,6 @@ function SetupSection({
           </Text>
         </View>
       </View>
-
       <View style={[styles.progressBar, { backgroundColor: theme.colors.surfaceVariant }]}>
         <View
           style={[
@@ -298,7 +706,6 @@ function SetupSection({
           ]}
         />
       </View>
-
       <View style={styles.stepsList}>
         <SetupStep
           icon="calendar-week"
@@ -318,7 +725,7 @@ function SetupSection({
           description={
             dietPlanConfigured
               ? (dietPlanSummary ?? 'Configure')
-              : 'Composants attendus dans chaque repas (legumes, proteine, feculents...)'
+              : 'Composants attendus (legumes, proteine, feculents...)'
           }
           done={dietPlanConfigured}
           required={false}
@@ -418,122 +825,105 @@ function SetupStep({
   );
 }
 
-function PlanningRow({ planning }: { planning: Planning }) {
-  const theme = useTheme();
-  return (
-    <TouchableRipple
-      onPress={() => router.push(`/(app)/(tabs)/planning/${planning.id}`)}
-      borderless
-      style={[styles.planningRow, { backgroundColor: theme.colors.surface }]}
-    >
-      <View style={styles.planningRowInner}>
-        <Surface
-          elevation={0}
-          style={[styles.planningThumb, { backgroundColor: theme.colors.primaryContainer }]}
-        >
-          <Text style={styles.planningEmoji}>📆</Text>
-        </Surface>
-        <View style={{ flex: 1 }}>
-          <Text variant="titleMedium" style={styles.planningName} numberOfLines={1}>
-            {planning.name}
-          </Text>
-          <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-            {formatShortDate(planning.startDate)} → {formatShortDate(planning.endDate)}
-          </Text>
-        </View>
-        <Chip
-          compact
-          style={{
-            backgroundColor:
-              planning.status === 'active'
-                ? theme.colors.primaryContainer
-                : theme.colors.surfaceVariant,
-          }}
-          textStyle={styles.statusChipText}
-        >
-          {planning.status === 'active' ? 'Actif' : planning.status}
-        </Chip>
-      </View>
-    </TouchableRipple>
-  );
+// ============================================================================
+// Helpers
+// ============================================================================
+function addDaysSafe(s: string, n: number): string {
+  // Reimplem simple pour eviter d'importer addDays (deja importable, mais ce
+  // composant n'a besoin que de cette mini fonction quand viewMode = week)
+  const d = new Date(`${s}T00:00:00`);
+  d.setDate(d.getDate() + n);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function formatRangeLabel(from: string, to: string): string {
+  const f = new Date(`${from}T00:00:00`);
+  const t = new Date(`${to}T00:00:00`);
+  const fmt = (d: Date) =>
+    `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+  return `${fmt(f)} → ${fmt(t)}`;
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: {
-    padding: 16,
-    gap: 16,
-    paddingBottom: 32,
-  },
+  container: { padding: 16, gap: 14, paddingBottom: 32 },
   header: { gap: 2, paddingTop: 4 },
   title: { fontWeight: '700' },
-  createBtn: {
-    borderRadius: 12,
-  },
-  createBtnContent: { paddingVertical: 6 },
-  listSection: { gap: 8 },
-  sectionTitle: { fontWeight: '700', letterSpacing: 0.3 },
-  empty: {
-    padding: 24,
-    borderRadius: 16,
-    alignItems: 'center',
-  },
-  emptyEmoji: { fontSize: 36, marginBottom: 8 },
-  emptyTitle: { fontWeight: '700' },
-  emptyBody: { textAlign: 'center', marginTop: 4 },
-  loaderRow: { padding: 16, alignItems: 'center' },
-  planningRow: {
-    padding: 12,
-    borderRadius: 14,
-    marginBottom: 8,
-  },
-  planningRowInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  planningThumb: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  planningEmoji: { fontSize: 22 },
-  planningName: { fontWeight: '700' },
-  statusChipText: { fontSize: 11 },
 
-  // SetupSection - mode "fresh"
-  setupCard: {
-    padding: 16,
-    borderRadius: 18,
-    gap: 12,
-  },
-  setupHeader: {
+  toolbarRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  navRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: -4,
   },
-  setupTitle: { fontWeight: '700' },
-  setupSubtitle: { marginTop: 4, lineHeight: 18 },
-  setupProgressBlock: {
-    minWidth: 36,
-    alignItems: 'flex-end',
+  navLabel: { textAlign: 'center', fontWeight: '700' },
+
+  loaderRow: { padding: 20, alignItems: 'center' },
+
+  // Month grid
+  monthGrid: { gap: 4 },
+  monthRow: { flexDirection: 'row', gap: 4 },
+  monthHeaderCell: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 4,
   },
-  setupProgressText: { fontWeight: '800', fontSize: 14 },
-  progressBar: {
-    height: 6,
-    borderRadius: 3,
+  monthCell: {
+    flex: 1,
+    aspectRatio: 1,
+    borderRadius: 10,
     overflow: 'hidden',
   },
-  progressBarFill: {
-    height: '100%',
-    borderRadius: 3,
+  monthCellInner: {
+    flex: 1,
+    padding: 6,
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
   },
+  cellBadge: {
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    alignSelf: 'flex-end',
+  },
+  cellBadgeText: { fontSize: 10, fontWeight: '800' },
+
+  // Week list
+  weekRow: { borderRadius: 14, padding: 10 },
+  weekRowInner: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  weekDayBubble: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 0,
+  },
+  weekChevron: { fontSize: 24, paddingHorizontal: 4 },
+
+  // Actions row
+  actionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  flexBtn: { flex: 1, borderRadius: 12 },
+  btnContent: { paddingVertical: 4 },
+
+  // SetupSection (copie de l'ancien index)
+  setupCard: { padding: 16, borderRadius: 18, gap: 12 },
+  setupHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  setupTitle: { fontWeight: '700' },
+  setupSubtitle: { marginTop: 4, lineHeight: 18 },
+  setupProgressBlock: { minWidth: 36, alignItems: 'flex-end' },
+  setupProgressText: { fontWeight: '800', fontSize: 14 },
+  progressBar: { height: 6, borderRadius: 3, overflow: 'hidden' },
+  progressBarFill: { height: '100%', borderRadius: 3 },
   stepsList: { gap: 4, marginTop: 4 },
-  step: {
-    borderRadius: 12,
-  },
+  step: { borderRadius: 12 },
   stepLocked: { opacity: 0.55 },
   stepInner: {
     flexDirection: 'row',
@@ -552,43 +942,15 @@ const styles = StyleSheet.create({
   stepBubbleIcon: { margin: 0 },
   stepCheck: { fontSize: 18, fontWeight: '800' },
   stepBody: { flex: 1 },
-  stepTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
+  stepTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   stepTitle: { fontWeight: '700' },
-  stepBadge: {
-    fontSize: 10,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
+  stepBadge: { fontSize: 10, letterSpacing: 0.5, textTransform: 'uppercase' },
   stepChevron: { fontSize: 22, lineHeight: 22, paddingHorizontal: 4 },
-
-  // SetupSection - mode "compact" (tout configure)
-  compactCard: {
-    padding: 14,
-    borderRadius: 16,
-    gap: 8,
-  },
-  compactRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
+  compactCard: { padding: 14, borderRadius: 16, gap: 8 },
+  compactRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   compactItem: { flex: 1 },
-  compactLabel: {
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-    fontSize: 10,
-  },
+  compactLabel: { letterSpacing: 0.5, textTransform: 'uppercase', fontSize: 10 },
   compactValue: { fontWeight: '700', marginTop: 2 },
   compactDivider: { width: 1, height: 32 },
-  compactCog: { margin: 0 },
-  compactActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 4,
-    marginTop: 4,
-  },
+  compactActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 4, marginTop: 4 },
 });

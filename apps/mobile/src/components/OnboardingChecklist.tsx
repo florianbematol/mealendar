@@ -4,17 +4,19 @@
  *  1. plan-type configure (au moins 1 slot par jour)
  *  2. plan alimentaire personnel configure
  *  3. au moins 1 recette dans la bibliotheque
- *  4. au moins 1 planning cree
+ *  4. au moins 1 repas planifie cette semaine
  *
  * Quand toutes les etapes sont validees, le composant ne rend rien
  * (il disparait completement, sans tracer "100%").
  */
 import { useMyDietPlan } from '@/hooks/useDietPlans';
-import { useMealPlan, usePlannings } from '@/hooks/usePlannings';
+import { useMealPlan, useMealsRange } from '@/hooks/usePlannings';
 import { useRecipes } from '@/hooks/useRecipes';
+import { addDays, startOfWeek, todayIso } from '@/lib/dates';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { router } from 'expo-router';
+import { useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { ProgressBar, Surface, Text, TouchableRipple, useTheme } from 'react-native-paper';
 
@@ -24,7 +26,6 @@ type Step = {
   description: string;
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   done: boolean;
-  /** Route a ouvrir au tap. */
   onPress: () => void;
 };
 
@@ -35,12 +36,14 @@ export function OnboardingChecklist() {
   const mealPlan = useMealPlan(householdId);
   const myDietPlan = useMyDietPlan(householdId);
   const recipes = useRecipes(householdId);
-  const plannings = usePlannings(householdId);
+  const weekRange = useMemo(() => {
+    const start = startOfWeek(todayIso());
+    return { from: start, to: addDays(start, 6) };
+  }, []);
+  const meals = useMealsRange(householdId, weekRange.from, weekRange.to);
 
-  // Toutes les queries doivent etre chargees pour eviter de flasher la
-  // checklist puis de la faire disparaitre.
   const isLoading =
-    mealPlan.isPending || myDietPlan.isPending || recipes.isPending || plannings.isPending;
+    mealPlan.isPending || myDietPlan.isPending || recipes.isPending || meals.isPending;
   if (isLoading) return null;
 
   const slotConfigured =
@@ -53,7 +56,7 @@ export function OnboardingChecklist() {
       myDietPlan.data.goals.length > 0 ||
       Object.values(myDietPlan.data.dietPlan.slots).some((s) => (s ?? []).length > 0));
   const hasRecipes = (recipes.data?.items.length ?? 0) > 0;
-  const hasPlannings = (plannings.data?.length ?? 0) > 0;
+  const hasMealsThisWeek = (meals.data?.meals.length ?? 0) > 0;
 
   const steps: Step[] = [
     {
@@ -82,10 +85,10 @@ export function OnboardingChecklist() {
     },
     {
       key: 'planning',
-      label: 'Creer ma premiere semaine',
-      description: 'Generez votre planning de la semaine.',
+      label: 'Planifier cette semaine',
+      description: 'Posez votre premier repas sur le calendrier.',
       icon: 'calendar-blank',
-      done: hasPlannings,
+      done: hasMealsThisWeek,
       onPress: () => router.push('/(app)/(tabs)/planning'),
     },
   ];

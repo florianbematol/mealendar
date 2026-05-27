@@ -2,7 +2,6 @@ import {
   type BarcodeLookupResponse,
   BarcodeLookupResponseSchema,
   type CreateHouseholdInput,
-  type CreatePlanningInput,
   type CreateRecipeInput,
   type GeneratePlanningInput,
   type GeneratePlanningResponse,
@@ -32,14 +31,12 @@ import {
   MeResponseSchema,
   type MealPlan,
   MealPlanSchema,
+  type MealsRange,
+  MealsRangeSchema,
   type OffProduct,
   OffProductSchema,
   type PlannedMeal,
   PlannedMealSchema,
-  type Planning,
-  PlanningSchema,
-  type PlanningWithMeals,
-  PlanningWithMealsSchema,
   type RecipePhotoUploadInput,
   type RecipePhotoUploadResponse,
   RecipePhotoUploadResponseSchema,
@@ -48,7 +45,7 @@ import {
   type RegisterPushTokenInput,
   type SearchIngredientsResponse,
   SearchIngredientsResponseSchema,
-  type SetPlanningMealsInput,
+  type SetMealsRangeInput,
   type ShoppingListResponse,
   ShoppingListResponseSchema,
   type UpdatePlannedMealInput,
@@ -239,7 +236,7 @@ export async function deleteRecipePhoto(recipeId: string): Promise<void> {
 }
 
 // ===========================================================================
-// Plan-type & Plannings
+// Plan-type & Calendrier libre (meals rattaches directement au foyer)
 // ===========================================================================
 
 const GetMealPlanResponseSchema = z.object({ mealPlan: MealPlanSchema.nullable() });
@@ -257,34 +254,31 @@ export async function upsertMealPlan(input: UpsertMealPlanInput): Promise<MealPl
   return UpsertMealPlanResponseSchema.parse(data).mealPlan;
 }
 
-const ListPlanningsResponseSchema = z.object({ items: z.array(PlanningSchema) });
-export async function listPlannings(householdId: string): Promise<Planning[]> {
-  const data = await request<unknown>(`/api/households/${householdId}/plannings`);
-  return ListPlanningsResponseSchema.parse(data).items;
+/**
+ * Recupere les meals d'un foyer dans la fenetre [from, to] (inclusive).
+ */
+export async function getMealsRange(
+  householdId: string,
+  from: string,
+  to: string,
+): Promise<MealsRange> {
+  const params = new URLSearchParams({ from, to });
+  const data = await request<unknown>(`/api/households/${householdId}/meals?${params.toString()}`);
+  return MealsRangeSchema.parse(data);
 }
 
-export async function getPlanning(id: string): Promise<PlanningWithMeals> {
-  const data = await request<unknown>(`/api/plannings/${id}`);
-  return PlanningWithMealsSchema.parse(data);
-}
-
-export async function createPlanning(input: CreatePlanningInput): Promise<Planning> {
-  const data = await request<unknown>('/api/plannings', {
-    method: 'POST',
-    body: JSON.stringify(input),
-  });
-  return PlanningSchema.parse(data);
-}
-
-export async function setPlanningMeals(
-  planningId: string,
-  input: SetPlanningMealsInput,
-): Promise<PlanningWithMeals> {
-  const data = await request<unknown>(`/api/plannings/${planningId}/meals`, {
+/**
+ * Replace tous les meals du foyer dans [dateFrom, dateTo] par la liste fournie.
+ */
+export async function setMealsRange(
+  householdId: string,
+  input: SetMealsRangeInput,
+): Promise<MealsRange> {
+  const data = await request<unknown>(`/api/households/${householdId}/meals`, {
     method: 'PUT',
     body: JSON.stringify(input),
   });
-  return PlanningWithMealsSchema.parse(data);
+  return MealsRangeSchema.parse(data);
 }
 
 export async function updatePlannedMeal(
@@ -298,26 +292,41 @@ export async function updatePlannedMeal(
   return PlannedMealSchema.parse(data);
 }
 
-export async function deletePlanning(id: string): Promise<void> {
-  await request<unknown>(`/api/plannings/${id}`, { method: 'DELETE' });
+export async function deletePlannedMeal(mealId: string): Promise<void> {
+  await request<unknown>(`/api/planned-meals/${mealId}`, { method: 'DELETE' });
 }
 
-export async function getShoppingList(planningId: string): Promise<ShoppingListResponse> {
-  const data = await request<unknown>(`/api/plannings/${planningId}/shopping-list`);
+export async function getShoppingList(
+  householdId: string,
+  from: string,
+  to: string,
+): Promise<ShoppingListResponse> {
+  const params = new URLSearchParams({ from, to });
+  const data = await request<unknown>(
+    `/api/households/${householdId}/shopping-list?${params.toString()}`,
+  );
   return ShoppingListResponseSchema.parse(data);
 }
 
 /**
- * URL absolue (avec auth en query si besoin) du fichier ICS d'un planning.
- * Le client mobile va plutot fetch le contenu directement et l'ecrire pour partage.
+ * Recupere le contenu ICS pour la fenetre [from, to] sous forme de string,
+ * pour partage local (FileSystem + Sharing) cote mobile.
  */
-export async function fetchPlanningIcs(planningId: string): Promise<string> {
+export async function fetchHouseholdIcs(
+  householdId: string,
+  from: string,
+  to: string,
+): Promise<string> {
   const session = await supabase.auth.getSession();
   const token = session.data.session?.access_token;
   if (!token) throw new ApiError('Not authenticated', 401);
-  const res = await fetch(`${API_BASE_URL}/api/plannings/${planningId}/ics`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const params = new URLSearchParams({ from, to });
+  const res = await fetch(
+    `${API_BASE_URL}/api/households/${householdId}/ics?${params.toString()}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
   if (!res.ok) {
     throw new ApiError(`HTTP ${res.status}`, res.status);
   }

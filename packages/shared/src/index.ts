@@ -817,12 +817,14 @@ export type UpsertMealPlanInput = z.infer<typeof UpsertMealPlanInputSchema>;
 /**
  * Planning : un planning genere pour une periode.
  */
-export const PlanningStatusSchema = z.enum(['draft', 'active', 'archived']);
-export type PlanningStatus = z.infer<typeof PlanningStatusSchema>;
-
 export const PlannedMealSchema = z.object({
   id: UuidSchema,
-  planningId: UuidSchema,
+  /**
+   * Foyer auquel ce repas appartient. Depuis la refonte calendrier libre,
+   * les meals ne sont plus regroupes par 'planning' (entite supprimee) et
+   * sont rattaches directement au foyer.
+   */
+  householdId: UuidSchema,
   date: z.string(), // YYYY-MM-DD
   slotKey: MealSlotKeySchema,
   recipeId: UuidSchema.nullable(),
@@ -847,35 +849,18 @@ export const PlannedMealSchema = z.object({
 });
 export type PlannedMeal = z.infer<typeof PlannedMealSchema>;
 
-export const PlanningSchema = z.object({
-  id: UuidSchema,
+/**
+ * Reponse "tous les meals d'un foyer dans une fenetre [dateFrom, dateTo]".
+ * Remplace l'ancienne structure PlanningWithMeals (qui dependait d'une entite
+ * planning supprimee).
+ */
+export const MealsRangeSchema = z.object({
   householdId: UuidSchema,
-  mealPlanId: UuidSchema.nullable(),
-  name: z.string(),
-  startDate: z.string(),
-  endDate: z.string(),
-  status: PlanningStatusSchema,
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
-export type Planning = z.infer<typeof PlanningSchema>;
-
-export const PlanningWithMealsSchema = PlanningSchema.extend({
+  dateFrom: z.string(), // YYYY-MM-DD
+  dateTo: z.string(), // YYYY-MM-DD
   meals: z.array(PlannedMealSchema),
 });
-export type PlanningWithMeals = z.infer<typeof PlanningWithMealsSchema>;
-
-/**
- * Inputs CRUD planning
- */
-export const CreatePlanningInputSchema = z.object({
-  householdId: UuidSchema,
-  startDate: z.string(),
-  endDate: z.string(),
-  mealPlanId: UuidSchema.nullable().optional(),
-  name: z.string().min(1).max(100).optional(),
-});
-export type CreatePlanningInput = z.infer<typeof CreatePlanningInputSchema>;
+export type MealsRange = z.infer<typeof MealsRangeSchema>;
 
 export const PlannedMealInputSchema = z.object({
   date: z.string(),
@@ -891,11 +876,17 @@ export const PlannedMealInputSchema = z.object({
 });
 export type PlannedMealInput = z.infer<typeof PlannedMealInputSchema>;
 
-export const SetPlanningMealsInputSchema = z.object({
+export const SetMealsRangeInputSchema = z.object({
+  /** Date de debut de la fenetre (inclusive) YYYY-MM-DD */
+  dateFrom: z.string(),
+  /** Date de fin de la fenetre (inclusive) YYYY-MM-DD */
+  dateTo: z.string(),
+  /** Meals a placer dans la fenetre. Toutes les dates DOIVENT etre dans [dateFrom, dateTo]. */
   meals: z.array(PlannedMealInputSchema),
+  /** Si true, les meals existants avec locked=true dans la fenetre sont conserves. */
   keepLocked: z.boolean().default(true),
 });
-export type SetPlanningMealsInput = z.infer<typeof SetPlanningMealsInputSchema>;
+export type SetMealsRangeInput = z.infer<typeof SetMealsRangeInputSchema>;
 
 export const UpdatePlannedMealInputSchema = z.object({
   recipeId: UuidSchema.nullable().optional(),
@@ -920,7 +911,9 @@ export const ShoppingItemSchema = z.object({
 export type ShoppingItem = z.infer<typeof ShoppingItemSchema>;
 
 export const ShoppingListResponseSchema = z.object({
-  planningId: UuidSchema,
+  householdId: UuidSchema,
+  dateFrom: z.string(),
+  dateTo: z.string(),
   items: z.array(ShoppingItemSchema),
 });
 export type ShoppingListResponse = z.infer<typeof ShoppingListResponseSchema>;
@@ -1019,18 +1012,23 @@ export type LlmQuotaResponse = z.infer<typeof LlmQuotaResponseSchema>;
 // ============================================================================
 
 /**
- * Input : on demande au LLM de remplir le planning sur la fenetre [startDate, endDate]
- * en piochant uniquement parmi les recettes deja presentes en bibliotheque.
+ * Input : on demande au LLM de remplir une fenetre [dateFrom, dateTo] avec
+ * des meals, en piochant parmi les recettes deja en bibliotheque (ou en en
+ * creant de nouvelles selon `mode`).
  *
  * Le serveur enrichit le prompt avec :
- *  - le slot config (jours x slots) du plan-type
- *  - le diet plan (composants requis par slot)
+ *  - le slot config (jours x slots) du plan-type du foyer
+ *  - le diet plan (composants requis par slot, agrege multi-membres)
  *  - les recettes existantes (titre + slots cibles + tags + servings)
- *  - les meals deja locked dans le planning (pour ne pas les ecraser)
+ *  - les meals deja locked dans la fenetre (pour ne pas les ecraser)
  *  - les regles de variete (minDaysBetweenSameRecipe)
  */
 export const GeneratePlanningInputSchema = z.object({
-  planningId: UuidSchema,
+  householdId: UuidSchema,
+  /** Date de debut de la fenetre (inclusive) YYYY-MM-DD */
+  dateFrom: z.string(),
+  /** Date de fin de la fenetre (inclusive) YYYY-MM-DD */
+  dateTo: z.string(),
   /** Si true on conserve les meals deja locked. Defaut true. */
   keepLocked: z.boolean().default(true),
   /** Texte libre additionnel pour orienter l'IA (ex : "semaine plutot mediterraneenne"). */
