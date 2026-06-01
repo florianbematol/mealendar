@@ -1,10 +1,14 @@
 import {
   type DietComponent,
+  type DietPlan,
+  DietPlanSchema,
   GeneratePlanningInputSchema,
   type GeneratePlanningResponse,
   GenerateRecipeInputSchema,
   type GenerateRecipeResponse,
   type LlmQuotaResponse,
+  ParseDietPlanFromImageInputSchema,
+  type ParseDietPlanFromImageResponse,
   type RecipeWithIngredients,
   type UserDietPlan,
   aggregateDietPlansForSlot,
@@ -17,6 +21,7 @@ import {
   LlmNotConfiguredError,
   generatePlanningDraft,
   generateRecipeDraft,
+  parseDietPlanFromImage,
 } from '../lib/llm';
 import { getUserClient } from '../lib/supabase';
 import { getAuth, requireAuth } from '../middleware/auth';
@@ -510,6 +515,133 @@ llmRouter.post('/llm/generate-planning', async (c) => {
     output: outcome.output,
     filled,
     skipped: Math.max(0, skipped),
+    meta: {
+      model: outcome.model,
+      cacheHit: outcome.cacheHit,
+      generatedAt: new Date().toISOString(),
+    },
+  };
+  return c.json(payload);
+});
+
+// ============================================================================
+// POST /api/llm/parse-diet-plan-image
+//
+// Recoit une image base64 (photo / capture d'ecran d'un plan alimentaire),
+// renvoie un DietPlan structure pour previsualisation cote client.
+// L'utilisateur valide ensuite et l'applique via upsert_user_diet_plan.
+//
+// Rate limit : 1 unit (= 1 generation LLM, comme generate-recipe).
+// Cache : 30 jours sur le hash de (image + hint).
+// ============================================================================
+llmRouter.post('/llm/parse-diet-plan-image', async (c) => {
+  const auth = getAuth(c);
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  const parsed = ParseDietPlanFromImageInputSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'validation', issues: parsed.error.issues }, 400);
+  }
+  const input = parsed.data;
+  const sb = getUserClient(c.env, auth.accessToken);
+
+  // 1. Rate limit (les cache hits ne comptent pas)
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const { data: usedData, error: countErr } = await sb.rpc('count_llm_usage_since', {
+    p_since: since,
+  });
+  if (countErr) {
+    return c.json({ error: 'db_error', message: countErr.message }, 500);
+  }
+  const used = typeof usedData === 'number' ? usedData : 0;
+  if (used >= DAILY_LIMIT) {
+    return c.json(
+      {
+        error: 'rate_limited',
+        message: `Limite quotidienne atteinte (${DAILY_LIMIT} generations / 24h).`,
+        used24h: used,
+        dailyLimit: DAILY_LIMIT,
+      },
+      429,
+    );
+  }
+
+  // 2. Appel Gemini Vision
+  let outcome: Awaited<ReturnType<typeof parseDietPlanFromImage>>;
+  try {
+    outcome = await parseDietPlanFromImage(
+      {
+        imageBase64: input.imageBase64,
+        mimeType: input.mimeType,
+        hint: input.hint,
+      },
+      {
+        GEMINI_API_KEY: c.env.GEMINI_API_KEY,
+        GROQ_API_KEY: c.env.GROQ_API_KEY,
+        CACHE: c.env.CACHE,
+      },
+    );
+  } catch (err) {
+    console.error('[llm/parse-diet-plan-image] failed', err);
+    if (err instanceof LlmNotConfiguredError) {
+      return c.json(
+        {
+          error: 'llm_not_configured',
+          message: err.message,
+          hint: 'GEMINI_API_KEY non definie en environnement.',
+        },
+        503,
+      );
+    }
+    return c.json({ error: 'llm_failed', message: (err as Error).message }, 502);
+  }
+
+  // 3. Validation Zod du DietPlan extrait. Si ca ne valide pas, on echoue
+  // proprement plutot que de renvoyer une structure casse au client.
+  const dietPlanCandidate = {
+    slots: outcome.parsed.slots ?? {},
+    dailyRules: outcome.parsed.dailyRules ?? [],
+    note: outcome.parsed.note ?? null,
+  };
+  const validated = DietPlanSchema.safeParse(dietPlanCandidate);
+  if (!validated.success) {
+    console.warn('[llm/parse-diet-plan-image] invalid DietPlan from LLM', validated.error.issues);
+    return c.json(
+      {
+        error: 'invalid_extraction',
+        message: "L'IA n'a pas reussi a extraire un plan alimentaire valide depuis cette image.",
+        issues: validated.error.issues,
+      },
+      422,
+    );
+  }
+  const dietPlan: DietPlan = validated.data;
+
+  // 4. Audit (best-effort, on ne bloque pas la reponse si ca echoue)
+  const promptHash = await sha256Hex(`diet-img:${input.imageBase64.length}:${input.hint ?? ''}`);
+  void sb
+    .rpc('record_llm_usage', {
+      p_household_id: null,
+      p_kind: 'diet-plan-image',
+      p_model: outcome.model,
+      p_prompt_hash: promptHash,
+      p_cache_hit: outcome.cacheHit,
+      p_tokens_in: outcome.tokensIn ?? null,
+      p_tokens_out: outcome.tokensOut ?? null,
+    })
+    .then(({ error }: { error: { message: string } | null }) => {
+      if (error) console.warn('[llm/parse-diet-plan-image] record_llm_usage failed', error);
+    });
+
+  const payload: ParseDietPlanFromImageResponse = {
+    dietPlan,
+    summary: outcome.parsed.summary,
+    confidence: outcome.parsed.confidence,
     meta: {
       model: outcome.model,
       cacheHit: outcome.cacheHit,

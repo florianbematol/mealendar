@@ -1,7 +1,7 @@
 import { Topbar } from '@/components/Topbar';
 import { useMyDietPlan, useUpsertMyDietPlan } from '@/hooks/useDietPlans';
 import { useMealPlan } from '@/hooks/usePlannings';
-import { ApiError } from '@/lib/api';
+import { ApiError, parseDietPlanFromImage } from '@/lib/api';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import { toast } from '@/stores/toast';
 import {
@@ -13,9 +13,10 @@ import {
   type Goal,
   type Regime,
 } from '@mealendar/shared';
+import * as ImagePicker from 'expo-image-picker';
 import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Button,
@@ -194,6 +195,98 @@ export default function DietPlanScreen() {
     toast.info("Modele charge. N'oublie pas d'enregistrer pour le sauvegarder.");
   };
 
+  // ---------------------------------------------------------------------------
+  // Import depuis une photo (Gemini Vision)
+  // ---------------------------------------------------------------------------
+  const [importing, setImporting] = useState(false);
+  /**
+   * Plan extrait depuis l'image, en attente de validation utilisateur.
+   * null = pas d'import en cours.
+   */
+  const [importPreview, setImportPreview] = useState<{
+    dietPlan: DietPlan;
+    summary?: string;
+    confidence?: number;
+  } | null>(null);
+
+  const onImportFromPhoto = async () => {
+    Alert.alert('Importer un plan alimentaire', "Choisissez d'ou vient l'image.", [
+      { text: 'Annuler', style: 'cancel' },
+      { text: 'Galerie', onPress: () => pickAndImport('library') },
+      { text: 'Camera', onPress: () => pickAndImport('camera') },
+    ]);
+  };
+
+  const pickAndImport = async (source: 'library' | 'camera') => {
+    const perm =
+      source === 'camera'
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert(
+        'Permission refusee',
+        source === 'camera'
+          ? "Mealendar n'a pas acces a la camera."
+          : "Mealendar n'a pas acces a vos photos.",
+      );
+      return;
+    }
+    const res =
+      source === 'camera'
+        ? await ImagePicker.launchCameraAsync({
+            mediaTypes: ['images'],
+            allowsEditing: false,
+            quality: 0.6,
+            base64: true,
+          })
+        : await ImagePicker.launchImageLibraryAsync({
+            mediaTypes: ['images'],
+            allowsEditing: false,
+            quality: 0.6,
+            base64: true,
+          });
+    if (res.canceled) return;
+    const asset = res.assets[0];
+    if (!asset?.base64) {
+      toast.error('Image illisible.');
+      return;
+    }
+    // Determine MIME : asset.mimeType est defini sur iOS+Android recents
+    const mime = (asset.mimeType ?? 'image/jpeg').toLowerCase();
+    const safeMime: 'image/jpeg' | 'image/png' | 'image/webp' =
+      mime === 'image/png' ? 'image/png' : mime === 'image/webp' ? 'image/webp' : 'image/jpeg';
+
+    setImporting(true);
+    try {
+      const result = await parseDietPlanFromImage({
+        imageBase64: asset.base64,
+        mimeType: safeMime,
+      });
+      setImportPreview({
+        dietPlan: result.dietPlan,
+        summary: result.summary,
+        confidence: result.confidence,
+      });
+    } catch (e) {
+      if (e instanceof ApiError) {
+        toast.error(`Erreur IA: ${e.message}`);
+      } else {
+        toast.error(e instanceof Error ? e.message : 'Erreur inconnue');
+      }
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const onConfirmImport = () => {
+    if (!importPreview) return;
+    setDietPlan(importPreview.dietPlan);
+    setImportPreview(null);
+    toast.info("Plan importe. N'oublie pas d'enregistrer pour le sauvegarder.");
+  };
+
+  const onCancelImport = () => setImportPreview(null);
+
   const onSave = async () => {
     if (!householdId) {
       setError('Aucun foyer actif.');
@@ -273,15 +366,28 @@ export default function DietPlanScreen() {
               Votre profil personnel : regimes, allergies, objectifs et besoins par repas. Quand un
               repas concerne plusieurs membres, leurs besoins sont additionnes.
             </Text>
-            <Button
-              mode="contained-tonal"
-              icon="auto-fix"
-              onPress={onLoadTemplate}
-              style={{ marginTop: 12, borderRadius: 10 }}
-              compact
-            >
-              Charger le modele equilibre
-            </Button>
+            <View style={styles.introActions}>
+              <Button
+                mode="contained-tonal"
+                icon="auto-fix"
+                onPress={onLoadTemplate}
+                style={styles.introBtn}
+                compact
+              >
+                Charger modele
+              </Button>
+              <Button
+                mode="contained-tonal"
+                icon="camera-outline"
+                onPress={onImportFromPhoto}
+                style={styles.introBtn}
+                loading={importing}
+                disabled={importing}
+                compact
+              >
+                Importer photo
+              </Button>
+            </View>
           </Surface>
 
           {/* Regimes */}
@@ -505,6 +611,91 @@ export default function DietPlanScreen() {
           onDismiss={() => setEditing(null)}
         />
       )}
+
+      {/* Preview de l'import depuis photo : l'utilisateur valide l'extraction
+          IA avant qu'elle ecrase le diet plan courant. */}
+      <Portal>
+        <Dialog visible={!!importPreview} onDismiss={onCancelImport} style={{ maxHeight: '85%' }}>
+          <Dialog.Title>Plan extrait par l'IA</Dialog.Title>
+          <Dialog.Content>
+            {importPreview?.summary && (
+              <Text
+                variant="bodySmall"
+                style={{ color: theme.colors.onSurfaceVariant, marginBottom: 8 }}
+              >
+                {importPreview.summary}
+              </Text>
+            )}
+            {importPreview?.confidence != null && (
+              <Text
+                variant="labelSmall"
+                style={{
+                  color:
+                    importPreview.confidence > 0.7
+                      ? theme.colors.primary
+                      : importPreview.confidence > 0.4
+                        ? theme.colors.tertiary
+                        : theme.colors.error,
+                  marginBottom: 8,
+                  fontWeight: '700',
+                }}
+              >
+                Confiance : {Math.round(importPreview.confidence * 100)}%
+              </Text>
+            )}
+            <Text variant="bodyMedium" style={{ marginBottom: 4, fontWeight: '700' }}>
+              Apercu :
+            </Text>
+            <ScrollView style={{ maxHeight: 360 }}>
+              {importPreview &&
+                Object.entries(importPreview.dietPlan.slots)
+                  .filter(([, comps]) => (comps?.length ?? 0) > 0)
+                  .map(([slotKey, comps]) => (
+                    <View key={slotKey} style={{ marginBottom: 10 }}>
+                      <Text variant="labelLarge" style={{ fontWeight: '700' }}>
+                        {SLOT_LABELS[slotKey] ?? slotKey}
+                      </Text>
+                      {(comps ?? []).map((c) => (
+                        <Text
+                          key={c.id}
+                          variant="bodySmall"
+                          style={{ color: theme.colors.onSurfaceVariant, marginLeft: 8 }}
+                        >
+                          • {c.label} ({c.alternatives.length} alternative
+                          {c.alternatives.length > 1 ? 's' : ''})
+                        </Text>
+                      ))}
+                    </View>
+                  ))}
+              {importPreview && (importPreview.dietPlan.dailyRules ?? []).length > 0 && (
+                <View>
+                  <Text variant="labelLarge" style={{ fontWeight: '700' }}>
+                    Regles journalieres
+                  </Text>
+                  {importPreview.dietPlan.dailyRules.map((c) => (
+                    <Text
+                      key={c.id}
+                      variant="bodySmall"
+                      style={{ color: theme.colors.onSurfaceVariant, marginLeft: 8 }}
+                    >
+                      • {c.label}
+                    </Text>
+                  ))}
+                </View>
+              )}
+            </ScrollView>
+            <HelperText type="info" visible style={{ marginTop: 8 }}>
+              Valider remplace votre plan actuel. Vous pourrez le modifier ensuite.
+            </HelperText>
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={onCancelImport}>Annuler</Button>
+            <Button mode="contained" onPress={onConfirmImport}>
+              Valider
+            </Button>
+          </Dialog.Actions>
+        </Dialog>
+      </Portal>
     </SafeAreaView>
   );
 }
@@ -852,6 +1043,8 @@ const styles = StyleSheet.create({
 
   intro: { padding: 16, borderRadius: 14 },
   introTitle: { fontWeight: '700' },
+  introActions: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  introBtn: { flex: 1, borderRadius: 10 },
 
   slotCard: { padding: 14, borderRadius: 14, gap: 8 },
   slotHeader: {

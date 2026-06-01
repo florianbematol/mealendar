@@ -1133,6 +1133,42 @@ export const GeneratePlanningResponseSchema = z.object({
 export type GeneratePlanningResponse = z.infer<typeof GeneratePlanningResponseSchema>;
 
 // ============================================================================
+// LLM : parsing d'un plan alimentaire depuis une image
+//
+// Use case : l'utilisateur a une photo / capture d'ecran d'un plan
+// alimentaire (papier dieteticien, doc imprime, capture web...) et veut
+// l'importer dans Mealendar plutot que de tout saisir a la main.
+//
+// Le LLM (Gemini Flash, qui supporte les images) recoit l'image en base64,
+// extrait les composants par slot + les regles globales, et renvoie un
+// DietPlan structure que le client previsualise avant de l'appliquer.
+// ============================================================================
+
+export const ParseDietPlanFromImageInputSchema = z.object({
+  /** Image base64 (sans le prefixe data:image/...). */
+  imageBase64: z.string().min(1),
+  /** MIME de l'image (image/jpeg, image/png, image/webp). */
+  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+  /** Hint optionnel pour orienter l'extraction. */
+  hint: z.string().max(500).optional(),
+});
+export type ParseDietPlanFromImageInput = z.infer<typeof ParseDietPlanFromImageInputSchema>;
+
+export const ParseDietPlanFromImageResponseSchema = z.object({
+  dietPlan: DietPlanSchema,
+  /** Resume textuel court (ce que le LLM a vu). */
+  summary: z.string().max(500).optional(),
+  /** Confidence 0..1 que l'extraction est correcte (heuristique LLM). */
+  confidence: z.number().min(0).max(1).optional(),
+  meta: z.object({
+    model: z.string(),
+    cacheHit: z.boolean(),
+    generatedAt: z.string().datetime(),
+  }),
+});
+export type ParseDietPlanFromImageResponse = z.infer<typeof ParseDietPlanFromImageResponseSchema>;
+
+// ============================================================================
 // Import recette depuis URL
 // ============================================================================
 export const ImportRecipeInputSchema = z.object({

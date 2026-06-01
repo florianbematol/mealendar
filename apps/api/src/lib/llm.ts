@@ -620,3 +620,199 @@ export async function generatePlanningDraft(
 
   return { ...outcome, cacheHit: false };
 }
+
+// ============================================================================
+// Parse d'un plan alimentaire depuis une image (Gemini Vision)
+//
+// Gemini accepte des images via inline_data (base64). On lui demande de
+// retourner directement un JSON conforme a DietPlanSchema : un objet
+// { slots: { breakfast: [...], lunch: [...], ... }, dailyRules: [...] }.
+//
+// Strategie de robustesse : on accepte que le LLM produise des structures
+// imparfaites (ex. unite manquante, alternatives sans qty), le client les
+// affichera tel quel pour edition. La validation Zod cote API tolere les
+// champs optionnels.
+// ============================================================================
+
+const DIET_IMAGE_SYSTEM_PROMPT = `Tu es un assistant qui extrait des plans alimentaires depuis une image.
+On te fournit une image (photo / capture d'ecran) d'un plan alimentaire (typiquement une feuille remise par un dieteticien, ou un document imprime).
+Tu dois renvoyer UNIQUEMENT un JSON valide qui represente le plan en structure Mealendar.
+
+Schema attendu :
+{
+  "slots": {
+    "breakfast": [...] | undefined,
+    "lunch": [...] | undefined,
+    "snack": [...] | undefined,
+    "dinner": [...] | undefined
+  },
+  "dailyRules": [...],
+  "note": "..." | null,
+  "summary": "1-2 phrases qui decrivent ce qui a ete extrait",
+  "confidence": 0.0-1.0
+}
+
+Chaque element [...] est un "composant" :
+{
+  "id": "string-court-unique",
+  "label": "Nom du composant (ex: 'Proteine', 'Legumes')",
+  "required": true,
+  "alternatives": [
+    {
+      "category": "protein|vegetable|fruit|carb|dairy|fat|drink|other",
+      "label": "Nom de l'alternative (ex: 'Viande', '2 oeufs')",
+      "qtyMin": number | null,
+      "qtyMax": number | null,
+      "unit": "g|ml|piece|c.a.s|c.a.c|portion" | null,
+      "note": "string courte" | null
+    }
+  ],
+  "note": "string courte" | null
+}
+
+Regles :
+- Les slots: 'breakfast' (petit-dej), 'lunch' (dejeuner), 'snack' (gouter), 'dinner' (diner). N'invente pas de slot.
+- Les composants doivent etre orientes "Mealendar" : groupes logiques (Proteine, Legumes, Feculents, Matiere grasse, Produit laitier, Fruit, Boisson...).
+- Les "alternatives" sont les substituts equivalents pour ce composant (ex: "Viande 100g OU Poisson 150g OU 2 oeufs").
+- Les regles globales (huile, eau, etc.) vont dans dailyRules.
+- Si une info est ambigue ou illisible, mets-la quand meme avec une qty nulle plutot que de l'omettre.
+- Si tu ne reconnais aucun plan alimentaire dans l'image, renvoie { "slots": {}, "dailyRules": [], "summary": "Aucun plan alimentaire detecte", "confidence": 0 }.
+- N'inclus AUCUN texte hors du JSON. Pas de markdown, pas de \`\`\`json.`;
+
+type ParsedDietPlan = {
+  slots: Record<string, unknown>;
+  dailyRules: unknown[];
+  note?: string | null;
+  summary?: string;
+  confidence?: number;
+};
+
+/**
+ * Appel Gemini Vision pour extraire un plan alimentaire depuis une image.
+ */
+async function callGeminiVisionDietPlan(
+  apiKey: string,
+  imageBase64: string,
+  mimeType: string,
+  hint: string | undefined,
+): Promise<{ parsed: ParsedDietPlan; tokensIn?: number; tokensOut?: number; model: string }> {
+  const model = 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const userText = hint
+    ? `Voici une image de plan alimentaire. Indication : ${hint.trim()}`
+    : 'Voici une image de plan alimentaire. Extrais-le.';
+
+  const body = {
+    systemInstruction: {
+      role: 'system',
+      parts: [{ text: DIET_IMAGE_SYSTEM_PROMPT }],
+    },
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: userText }, { inline_data: { mime_type: mimeType, data: imageBase64 } }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: 'application/json',
+    },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Gemini ${res.status}: ${text.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  };
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  let parsed: ParsedDietPlan;
+  try {
+    parsed = JSON.parse(text) as ParsedDietPlan;
+  } catch (e) {
+    throw new Error(`Gemini returned invalid JSON: ${(e as Error).message}`);
+  }
+  return {
+    parsed,
+    tokensIn: data.usageMetadata?.promptTokenCount,
+    tokensOut: data.usageMetadata?.candidatesTokenCount,
+    model,
+  };
+}
+
+export type ParseDietPlanContext = {
+  imageBase64: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  hint?: string;
+};
+
+export type ParseDietPlanOutcome = {
+  parsed: ParsedDietPlan;
+  cacheHit: boolean;
+  model: string;
+  tokensIn?: number;
+  tokensOut?: number;
+};
+
+const DIET_IMAGE_CACHE_TTL_S = 60 * 60 * 24 * 30; // 30 jours
+
+/**
+ * Parse un plan alimentaire depuis une image. Utilise Gemini Vision en
+ * priorite ; si non configure, throw LlmNotConfiguredError.
+ *
+ * Cache : SHA-256 de (imageBase64 + hint), TTL 30 jours.
+ */
+export async function parseDietPlanFromImage(
+  ctx: ParseDietPlanContext,
+  env: { GEMINI_API_KEY?: string; GROQ_API_KEY?: string; CACHE?: KVNamespace },
+): Promise<ParseDietPlanOutcome> {
+  // Cache key : hash de (image + hint). On evite de mettre la base64 entiere
+  // dans la cle (longueur explosive), on hash.
+  let cacheKey: string | null = null;
+  if (env.CACHE) {
+    const { sha256Hex } = await import('./hash');
+    const hint = ctx.hint?.trim() ?? '';
+    cacheKey = `diet-img:${await sha256Hex(`${ctx.imageBase64.length}:${ctx.imageBase64.slice(0, 200)}${ctx.imageBase64.slice(-200)}:${hint}`)}`;
+    const cached = await env.CACHE.get(cacheKey);
+    if (cached) {
+      return {
+        parsed: JSON.parse(cached) as ParsedDietPlan,
+        cacheHit: true,
+        model: 'cache',
+      };
+    }
+  }
+
+  if (!env.GEMINI_API_KEY) {
+    throw new LlmNotConfiguredError();
+  }
+
+  const outcome = await callGeminiVisionDietPlan(
+    env.GEMINI_API_KEY,
+    ctx.imageBase64,
+    ctx.mimeType,
+    ctx.hint,
+  );
+
+  if (cacheKey && env.CACHE) {
+    await env.CACHE.put(cacheKey, JSON.stringify(outcome.parsed), {
+      expirationTtl: DIET_IMAGE_CACHE_TTL_S,
+    });
+  }
+
+  return {
+    parsed: outcome.parsed,
+    cacheHit: false,
+    model: outcome.model,
+    tokensIn: outcome.tokensIn,
+    tokensOut: outcome.tokensOut,
+  };
+}

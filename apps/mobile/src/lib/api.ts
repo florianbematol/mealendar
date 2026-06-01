@@ -41,6 +41,9 @@ import {
   MealsRangeSchema,
   type OffProduct,
   OffProductSchema,
+  type ParseDietPlanFromImageInput,
+  type ParseDietPlanFromImageResponse,
+  ParseDietPlanFromImageResponseSchema,
   type PlannedMeal,
   PlannedMealSchema,
   type RecipePhotoUploadInput,
@@ -458,6 +461,16 @@ export async function generateRecipeWithLlm(
     body: JSON.stringify(input),
   });
   return GenerateRecipeResponseSchema.parse(data);
+}
+
+export async function parseDietPlanFromImage(
+  input: ParseDietPlanFromImageInput,
+): Promise<ParseDietPlanFromImageResponse> {
+  const data = await request<unknown>('/api/llm/parse-diet-plan-image', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+  return ParseDietPlanFromImageResponseSchema.parse(data);
 }
 
 export async function generatePlanningWithLlm(
