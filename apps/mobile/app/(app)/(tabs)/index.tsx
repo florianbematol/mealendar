@@ -123,12 +123,7 @@ export default function HomeScreen() {
             subtitle="Aujourd'hui"
             color={theme.colors.primary}
             bg={theme.colors.primaryContainer}
-            onPress={() =>
-              router.push({
-                pathname: '/(app)/(tabs)/planning/day/[date]',
-                params: { date: todayIso() },
-              })
-            }
+            onPress={() => router.push(`/(app)/(tabs)/planning/day/${todayIso()}`)}
           />
           <ModuleTile
             icon="book-open-variant"

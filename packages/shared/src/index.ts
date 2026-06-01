@@ -862,6 +862,61 @@ export const MealsRangeSchema = z.object({
 });
 export type MealsRange = z.infer<typeof MealsRangeSchema>;
 
+// ============================================================================
+// MealPlanRange : plage nommee persistee
+//
+// Permet de "marquer" une fenetre de jours sur le calendrier pour la dupliquer
+// plus tard. Les repas eux-memes restent dans planned_meals.
+// ============================================================================
+export const MealPlanRangeSchema = z.object({
+  id: UuidSchema,
+  householdId: UuidSchema,
+  name: z.string(),
+  dateFrom: z.string(), // YYYY-MM-DD
+  dateTo: z.string(), // YYYY-MM-DD
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type MealPlanRange = z.infer<typeof MealPlanRangeSchema>;
+
+export const CreateMealPlanRangeInputSchema = z.object({
+  householdId: UuidSchema,
+  name: z.string().min(1).max(80),
+  dateFrom: z.string(),
+  dateTo: z.string(),
+});
+export type CreateMealPlanRangeInput = z.infer<typeof CreateMealPlanRangeInputSchema>;
+
+export const UpdateMealPlanRangeInputSchema = z.object({
+  name: z.string().min(1).max(80).optional(),
+  dateFrom: z.string().optional(),
+  dateTo: z.string().optional(),
+});
+export type UpdateMealPlanRangeInput = z.infer<typeof UpdateMealPlanRangeInputSchema>;
+
+/**
+ * Duplique tous les repas presents dans [sourceFrom, sourceTo] vers une
+ * nouvelle plage commencant a targetStart. Optionnellement cree aussi une
+ * meal_plan_ranges nommee.
+ */
+export const DuplicateMealsRangeInputSchema = z.object({
+  householdId: UuidSchema,
+  sourceFrom: z.string(),
+  sourceTo: z.string(),
+  targetStart: z.string(),
+  /** Si fournie, cree aussi une nouvelle plage nommee a la cible. */
+  createRangeName: z.string().min(1).max(80).optional(),
+});
+export type DuplicateMealsRangeInput = z.infer<typeof DuplicateMealsRangeInputSchema>;
+
+export const DuplicateMealsRangeResponseSchema = z.object({
+  inserted: z.number().int().nonnegative(),
+  targetFrom: z.string(),
+  targetTo: z.string(),
+  rangeId: UuidSchema.nullable(),
+});
+export type DuplicateMealsRangeResponse = z.infer<typeof DuplicateMealsRangeResponseSchema>;
+
 export const PlannedMealInputSchema = z.object({
   date: z.string(),
   slotKey: MealSlotKeySchema,

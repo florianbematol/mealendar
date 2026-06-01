@@ -397,12 +397,7 @@ export default function PlanningDayScreen() {
         <View style={styles.navRow}>
           <IconButton
             icon="chevron-left"
-            onPress={() =>
-              router.replace({
-                pathname: '/(app)/(tabs)/planning/day/[date]',
-                params: { date: addDays(date, -1) },
-              })
-            }
+            onPress={() => router.replace(`/(app)/(tabs)/planning/day/${addDays(date, -1)}`)}
           />
           <View style={{ flex: 1, alignItems: 'center' }}>
             <Text variant="titleSmall" style={{ color: theme.colors.onSurfaceVariant }}>
@@ -430,12 +425,7 @@ export default function PlanningDayScreen() {
           </View>
           <IconButton
             icon="chevron-right"
-            onPress={() =>
-              router.replace({
-                pathname: '/(app)/(tabs)/planning/day/[date]',
-                params: { date: addDays(date, 1) },
-              })
-            }
+            onPress={() => router.replace(`/(app)/(tabs)/planning/day/${addDays(date, 1)}`)}
           />
         </View>
 

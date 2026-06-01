@@ -1,18 +1,26 @@
 import {
+  createMealPlanRange,
+  deleteMealPlanRange,
   deletePlannedMeal,
+  duplicateMealsRange,
   fetchHouseholdIcs,
   generatePlanningWithLlm,
   getMealPlan,
   getMealsRange,
   getShoppingList,
+  listMealPlanRanges,
   setMealsRange,
+  updateMealPlanRange,
   updatePlannedMeal,
   upsertMealPlan,
 } from '@/lib/api';
 import type {
+  CreateMealPlanRangeInput,
+  DuplicateMealsRangeInput,
   GeneratePlanningInput,
   MealsRange,
   SetMealsRangeInput,
+  UpdateMealPlanRangeInput,
   UpdatePlannedMealInput,
   UpsertMealPlanInput,
 } from '@mealendar/shared';
@@ -148,6 +156,69 @@ export function useGeneratePlanningWithLlm(householdId: string) {
       qc.invalidateQueries({ queryKey: ['meals', householdId] });
       qc.invalidateQueries({ queryKey: ['shopping-list', householdId] });
       qc.invalidateQueries({ queryKey: ['llm-quota'] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Plages persistees (meal_plan_ranges)
+// ---------------------------------------------------------------------------
+
+export function useMealPlanRanges(
+  householdId: string | null | undefined,
+  from?: string,
+  to?: string,
+) {
+  return useQuery({
+    queryKey: ['meal-plan-ranges', householdId, from ?? null, to ?? null],
+    queryFn: () => listMealPlanRanges(householdId as string, from, to),
+    enabled: !!householdId,
+    staleTime: 30_000,
+  });
+}
+
+export function useCreateMealPlanRange() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateMealPlanRangeInput) => createMealPlanRange(input),
+    onSuccess: (range) => {
+      qc.invalidateQueries({ queryKey: ['meal-plan-ranges', range.householdId] });
+    },
+  });
+}
+
+export function useUpdateMealPlanRange(householdId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, input }: { id: string; input: UpdateMealPlanRangeInput }) =>
+      updateMealPlanRange(id, input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['meal-plan-ranges', householdId] });
+    },
+  });
+}
+
+export function useDeleteMealPlanRange(householdId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => deleteMealPlanRange(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['meal-plan-ranges', householdId] });
+    },
+  });
+}
+
+/**
+ * Duplique les meals d'une plage. Invalide les meals + les plages du foyer.
+ */
+export function useDuplicateMealsRange(householdId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: DuplicateMealsRangeInput) => duplicateMealsRange(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['meals', householdId] });
+      qc.invalidateQueries({ queryKey: ['meal-plan-ranges', householdId] });
+      qc.invalidateQueries({ queryKey: ['shopping-list', householdId] });
     },
   });
 }

@@ -2,7 +2,11 @@ import {
   type BarcodeLookupResponse,
   BarcodeLookupResponseSchema,
   type CreateHouseholdInput,
+  type CreateMealPlanRangeInput,
   type CreateRecipeInput,
+  type DuplicateMealsRangeInput,
+  type DuplicateMealsRangeResponse,
+  DuplicateMealsRangeResponseSchema,
   type GeneratePlanningInput,
   type GeneratePlanningResponse,
   GeneratePlanningResponseSchema,
@@ -30,6 +34,8 @@ import {
   type MeResponse,
   MeResponseSchema,
   type MealPlan,
+  type MealPlanRange,
+  MealPlanRangeSchema,
   MealPlanSchema,
   type MealsRange,
   MealsRangeSchema,
@@ -48,6 +54,7 @@ import {
   type SetMealsRangeInput,
   type ShoppingListResponse,
   ShoppingListResponseSchema,
+  type UpdateMealPlanRangeInput,
   type UpdatePlannedMealInput,
   type UpdateRecipeInput,
   type UpsertIngredientInput,
@@ -331,6 +338,61 @@ export async function fetchHouseholdIcs(
     throw new ApiError(`HTTP ${res.status}`, res.status);
   }
   return await res.text();
+}
+
+// ===========================================================================
+// Plages persistees (meal_plan_ranges)
+// ===========================================================================
+
+const ListMealPlanRangesResponseSchema = z.object({ items: z.array(MealPlanRangeSchema) });
+export async function listMealPlanRanges(
+  householdId: string,
+  from?: string,
+  to?: string,
+): Promise<MealPlanRange[]> {
+  const params = new URLSearchParams();
+  if (from && to) {
+    params.set('from', from);
+    params.set('to', to);
+  }
+  const qs = params.toString();
+  const data = await request<unknown>(
+    `/api/households/${householdId}/meal-plan-ranges${qs ? `?${qs}` : ''}`,
+  );
+  return ListMealPlanRangesResponseSchema.parse(data).items;
+}
+
+export async function createMealPlanRange(input: CreateMealPlanRangeInput): Promise<MealPlanRange> {
+  const data = await request<unknown>('/api/meal-plan-ranges', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+  return MealPlanRangeSchema.parse(data);
+}
+
+export async function updateMealPlanRange(
+  id: string,
+  input: UpdateMealPlanRangeInput,
+): Promise<MealPlanRange> {
+  const data = await request<unknown>(`/api/meal-plan-ranges/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  });
+  return MealPlanRangeSchema.parse(data);
+}
+
+export async function deleteMealPlanRange(id: string): Promise<void> {
+  await request<unknown>(`/api/meal-plan-ranges/${id}`, { method: 'DELETE' });
+}
+
+export async function duplicateMealsRange(
+  input: DuplicateMealsRangeInput,
+): Promise<DuplicateMealsRangeResponse> {
+  const data = await request<unknown>('/api/meal-plan-ranges/duplicate', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+  return DuplicateMealsRangeResponseSchema.parse(data);
 }
 
 // ===========================================================================

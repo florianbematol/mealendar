@@ -1,8 +1,11 @@
+import { SetupChip } from '@/components/SetupChip';
 import { Topbar } from '@/components/Topbar';
 import { useMyDietPlan } from '@/hooks/useDietPlans';
 import {
+  useCreateMealPlanRange,
   useGeneratePlanningWithLlm,
   useMealPlan,
+  useMealPlanRanges,
   useMealsRange,
   useSetMealsRange,
 } from '@/hooks/usePlannings';
@@ -12,11 +15,9 @@ import {
   WEEKDAYS,
   WEEKDAY_LABELS,
   addMonths,
-  endOfMonth,
   formatMonthYear,
   isSameMonth,
   monthGrid,
-  startOfMonth,
   startOfWeek,
   todayIso,
   weekDates,
@@ -24,25 +25,32 @@ import {
 import { haptics } from '@/lib/haptics';
 import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
+import { type MealPlanRange, findCoveredSlots } from '@mealendar/shared';
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
-import { Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { useMemo, useRef, useState } from 'react';
+import { Alert, PanResponder, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Button,
+  Dialog,
   IconButton,
-  SegmentedButtons,
+  Menu,
+  Portal,
   Surface,
   Text,
+  TextInput,
   TouchableRipple,
   useTheme,
 } from 'react-native-paper';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type ViewMode = 'month' | 'week';
 
 export default function PlanningIndexScreen() {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
+  // Hauteur du tabbar du bas (cf. apps/mobile/app/(app)/(tabs)/_layout.tsx)
+  const tabBarHeight = 56 + Math.max(insets.bottom, 8);
   const householdId = useActiveHousehold((s) => s.householdId);
   const mealPlan = useMealPlan(householdId);
   const myDietPlan = useMyDietPlan(householdId);
@@ -51,6 +59,24 @@ export default function PlanningIndexScreen() {
   const [viewMode, setViewMode] = useState<ViewMode>('month');
   /** Date de reference pour calculer la fenetre affichee. */
   const [refDate, setRefDate] = useState<string>(todayIso());
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+
+  // ---------------------------------------------------------------------------
+  // Selection de plage : long-press sur une cellule pose rangeStart, le tap
+  // suivant determine la 2e borne et navigue vers /planning/range/from/to
+  // (vue d'edition multi-jours). Pas d'etat 'range complet' ici : la sortie
+  // se fait par navigation.
+  // ---------------------------------------------------------------------------
+  const [rangeStart, setRangeStart] = useState<string | null>(null);
+  /**
+   * Quand l'utilisateur a tape la 2e cellule, on stocke le range complet ici
+   * et on ouvre une modale de nom. La plage n'est creee qu'a la validation
+   * de la modale.
+   */
+  const [pendingRange, setPendingRange] = useState<{ from: string; to: string } | null>(null);
+  const [pendingName, setPendingName] = useState('');
+
+  const clearRange = () => setRangeStart(null);
 
   // ---------------------------------------------------------------------------
   // Calcul de la fenetre [from, to] selon viewMode + refDate
@@ -76,17 +102,109 @@ export default function PlanningIndexScreen() {
   const meals = useMealsRange(householdId, window.from, window.to);
   const setMeals = useSetMealsRange(householdId ?? '');
   const generateLlm = useGeneratePlanningWithLlm(householdId ?? '');
+  const ranges = useMealPlanRanges(householdId, window.from, window.to);
+  const createRange = useCreateMealPlanRange();
+
+  /**
+   * Helper : pour une date donnee, retourne la plage qui la contient (la
+   * premiere plage qui matche si plusieurs se chevauchent), ou null.
+   */
+  const getRangeForDate = (date: string) => {
+    for (const r of ranges.data ?? []) {
+      if (date >= r.dateFrom && date <= r.dateTo) return r;
+    }
+    return null;
+  };
 
   // ---------------------------------------------------------------------------
-  // Index : nb de meals par date (pour le badge de chaque cellule)
+  // Handlers de cellule
   // ---------------------------------------------------------------------------
-  const mealCountByDate = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const m of meals.data?.meals ?? []) {
-      map.set(m.date, (map.get(m.date) ?? 0) + 1);
+  const onCellLongPress = (date: string) => {
+    haptics.medium();
+    setRangeStart(date);
+  };
+
+  /**
+   * Tap sur cellule :
+   *  - si on est en mode range (rangeStart pose) : on cree une plage persistee
+   *    [min(start, date), max(start, date)] et on navigue vers la vue range.
+   *  - si la date appartient deja a une plage existante : on ouvre la vue
+   *    range de cette plage.
+   *  - sinon : on ouvre la vue jour.
+   */
+  const onCellTap = async (date: string) => {
+    if (rangeStart) {
+      const a = rangeStart <= date ? rangeStart : date;
+      const b = rangeStart <= date ? date : rangeStart;
+      setRangeStart(null);
+      haptics.light();
+      // Ouvre la modale de nom plutot que de creer immediatement
+      setPendingRange({ from: a, to: b });
+      setPendingName(`Plage du ${formatDdMm(a)}`);
+      return;
     }
-    return map;
-  }, [meals.data]);
+    const existing = getRangeForDate(date);
+    if (existing) {
+      router.push(`/(app)/(tabs)/planning/range/${existing.dateFrom}/${existing.dateTo}`);
+      return;
+    }
+    router.push(`/(app)/(tabs)/planning/day/${date}`);
+  };
+
+  /**
+   * Validation de la modale de nom : cree la plage en DB puis navigue vers
+   * la vue range.
+   */
+  const onConfirmRange = async () => {
+    if (!pendingRange || !householdId) return;
+    const { from, to } = pendingRange;
+    const name = pendingName.trim() || `Plage du ${formatDdMm(from)}`;
+    setPendingRange(null);
+    setPendingName('');
+    try {
+      await createRange.mutateAsync({
+        householdId,
+        name,
+        dateFrom: from,
+        dateTo: to,
+      });
+    } catch (e) {
+      console.warn('[planning] create range failed', e);
+    }
+    router.push(`/(app)/(tabs)/planning/range/${from}/${to}`);
+  };
+
+  const onCancelRange = () => {
+    setPendingRange(null);
+    setPendingName('');
+  };
+
+  // ---------------------------------------------------------------------------
+  // Set des dates considerees comme "planifiees" pour le calendrier.
+  // Inclut :
+  //  - les jours qui ont un meal direct (mealsList)
+  //  - les jours dont un slot est COUVERT par un meal precedent avec
+  //    coversMeals > 1 (sinon on indique a tort que le jour est vide).
+  // ---------------------------------------------------------------------------
+  const plannedDays = useMemo(() => {
+    const set = new Set<string>();
+    const mealsList = meals.data?.meals ?? [];
+    for (const m of mealsList) set.add(m.date);
+    if (mealPlan.data) {
+      for (const m of mealsList) {
+        const cm = m.coversMeals ?? 1;
+        if (cm <= 1) continue;
+        const covered = findCoveredSlots({
+          sourceDate: m.date,
+          sourceSlotKey: m.slotKey,
+          coversMeals: cm,
+          slotConfig: mealPlan.data.slotConfig,
+        });
+        for (const c of covered) set.add(c.date);
+      }
+    }
+    return set;
+  }, [meals.data, mealPlan.data]);
 
   // ---------------------------------------------------------------------------
   // Setup state (reutilise la SetupSection existante)
@@ -111,128 +229,6 @@ export default function PlanningIndexScreen() {
   const dietRulesCount = myDietPlan.data?.dietPlan?.dailyRules?.length ?? 0;
 
   // ---------------------------------------------------------------------------
-  // Actions de generation sur la fenetre courante
-  // ---------------------------------------------------------------------------
-  const onGenerateRandom = async () => {
-    if (!householdId || !mealPlan.data) {
-      Alert.alert(
-        'Plan-type requis',
-        "Configurez d'abord votre plan-type pour generer des repas.",
-        [
-          { text: 'Plus tard', style: 'cancel' },
-          { text: 'Configurer', onPress: () => router.push('/(app)/(tabs)/planning/meal-plan') },
-        ],
-      );
-      return;
-    }
-    if ((recipes.data?.items.length ?? 0) === 0) {
-      Alert.alert(
-        'Aucune recette',
-        'Ajoutez au moins quelques recettes a votre bibliotheque pour pouvoir generer.',
-      );
-      return;
-    }
-    const generated = generatePlanningMeals({
-      startDate: window.from,
-      endDate: window.to,
-      slotConfig: mealPlan.data.slotConfig,
-      recipes: recipes.data?.items ?? [],
-      existingMeals: meals.data?.meals ?? [],
-      varietyRules: mealPlan.data.varietyRules,
-      defaultServings: 4,
-    });
-    try {
-      await setMeals.mutateAsync({
-        dateFrom: window.from,
-        dateTo: window.to,
-        meals: generated,
-        keepLocked: true,
-      });
-      haptics.success();
-    } catch (e) {
-      haptics.error();
-      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-    }
-  };
-
-  const onGenerateLlm = async () => {
-    if (!householdId || !mealPlan.data) {
-      Alert.alert('Plan-type requis', "Configurez d'abord votre plan-type.");
-      return;
-    }
-    if ((recipes.data?.items.length ?? 0) === 0) {
-      Alert.alert(
-        'Aucune recette',
-        "Ajoutez au moins quelques recettes a votre bibliotheque avant de demander a l'IA.",
-      );
-      return;
-    }
-    Alert.alert(
-      "Generer avec l'IA ?",
-      `L'IA va planifier les repas du ${formatRangeLabel(window.from, window.to)}. Consomme 1 unite de quota LLM.`,
-      [
-        { text: 'Annuler', style: 'cancel' },
-        {
-          text: 'Generer',
-          onPress: async () => {
-            try {
-              const res = await generateLlm.mutateAsync({
-                householdId,
-                dateFrom: window.from,
-                dateTo: window.to,
-                keepLocked: true,
-              });
-              haptics.success();
-              const skippedTxt =
-                res.skipped > 0
-                  ? ` ${res.skipped} slot${res.skipped > 1 ? 's' : ''} non rempli${res.skipped > 1 ? 's' : ''}.`
-                  : '';
-              Alert.alert(
-                'Repas generes',
-                `${res.filled} repas planifie${res.filled > 1 ? 's' : ''}.${skippedTxt}`,
-              );
-            } catch (e) {
-              haptics.error();
-              if (e instanceof ApiError) {
-                Alert.alert('Erreur IA', `${e.status} - ${e.message}`);
-              } else {
-                Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-              }
-            }
-          },
-        },
-      ],
-    );
-  };
-
-  const onClearWindow = async () => {
-    if (!householdId) return;
-    Alert.alert(
-      'Tout effacer',
-      `Supprime tous les repas du ${formatRangeLabel(window.from, window.to)} (sauf les verrouilles).`,
-      [
-        { text: 'Annuler', style: 'cancel' },
-        {
-          text: 'Effacer',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await setMeals.mutateAsync({
-                dateFrom: window.from,
-                dateTo: window.to,
-                meals: [],
-                keepLocked: true,
-              });
-            } catch (e) {
-              Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-            }
-          },
-        },
-      ],
-    );
-  };
-
-  // ---------------------------------------------------------------------------
   // Navigation periode prev/next
   // ---------------------------------------------------------------------------
   const onPrev = () => {
@@ -244,6 +240,37 @@ export default function PlanningIndexScreen() {
     else setRefDate((d) => addMonths(d, 1));
   };
   const onToday = () => setRefDate(todayIso());
+
+  /**
+   * Swipe horizontal sur le calendrier pour changer de periode.
+   * Seuils :
+   *  - dx > 50px et |dx| > |dy| * 1.5 -> swipe horizontal valide
+   *  - sinon le geste est rendu aux enfants (long-press, tap)
+   *
+   * On utilise useRef pour eviter de recreer le responder a chaque render
+   * (le responder capture viewMode/setRefDate via closure mais on lit
+   * depuis la ref a chaque release).
+   */
+  const swipeRef = useRef({ onPrev, onNext });
+  swipeRef.current = { onPrev, onNext };
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        // Ne capture que si geste clairement horizontal et significatif
+        onMoveShouldSetPanResponder: (_, gs) =>
+          Math.abs(gs.dx) > 12 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.5,
+        onPanResponderRelease: (_, gs) => {
+          if (gs.dx > 50) {
+            swipeRef.current.onPrev();
+            haptics.light();
+          } else if (gs.dx < -50) {
+            swipeRef.current.onNext();
+            haptics.light();
+          }
+        },
+      }),
+    [],
+  );
 
   const headerLabel = useMemo(() => {
     if (viewMode === 'week') {
@@ -261,83 +288,74 @@ export default function PlanningIndexScreen() {
       style={[styles.safe, { backgroundColor: theme.colors.background }]}
       edges={['top']}
     >
-      <Topbar
-        right={
-          <View style={{ flexDirection: 'row' }}>
-            <IconButton
-              icon="cart-outline"
-              size={22}
-              onPress={() =>
-                router.push({
-                  pathname: '/(app)/(tabs)/planning/shopping',
-                  params: { from: window.from, to: window.to },
-                })
-              }
-              iconColor={theme.colors.onSurfaceVariant}
-            />
-            <IconButton
-              icon="cog-outline"
-              size={22}
-              onPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
-              iconColor={theme.colors.onSurfaceVariant}
-            />
-          </View>
-        }
-      />
+      <Topbar />
 
-      <ScrollView
-        contentContainerStyle={styles.container}
-        refreshControl={
-          <RefreshControl
-            refreshing={meals.isFetching && !meals.isPending}
-            onRefresh={() => {
-              void meals.refetch();
-              void mealPlan.refetch();
-            }}
-            tintColor={theme.colors.primary}
-          />
-        }
+      <View
+        style={[styles.container, { paddingBottom: tabBarHeight + 16, backgroundColor: 'blue' }]}
       >
-        <View style={styles.header}>
+        <View style={styles.titleRow}>
           <Text variant="titleLarge" style={styles.title}>
             Planning
           </Text>
-          <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-            Tapez un jour pour planifier les repas.
-          </Text>
+          <View style={styles.titleRowRight}>
+            <Menu
+              visible={modeMenuOpen}
+              onDismiss={() => setModeMenuOpen(false)}
+              anchor={
+                <IconButton
+                  icon={viewMode === 'month' ? 'view-module-outline' : 'view-week-outline'}
+                  size={22}
+                  onPress={() => setModeMenuOpen(true)}
+                  style={{ margin: 0 }}
+                />
+              }
+            >
+              <Menu.Item
+                onPress={() => {
+                  setViewMode('week');
+                  setModeMenuOpen(false);
+                }}
+                title="Semaine"
+                leadingIcon="view-week-outline"
+                titleStyle={
+                  viewMode === 'week'
+                    ? { color: theme.colors.primary, fontWeight: '700' }
+                    : undefined
+                }
+              />
+              <Menu.Item
+                onPress={() => {
+                  setViewMode('month');
+                  setModeMenuOpen(false);
+                }}
+                title="Mois"
+                leadingIcon="view-module-outline"
+                titleStyle={
+                  viewMode === 'month'
+                    ? { color: theme.colors.primary, fontWeight: '700' }
+                    : undefined
+                }
+              />
+            </Menu>
+            <SetupChip
+              iconOnly
+              mealPlanConfigured={!!mealPlan.data}
+              dietPlanConfigured={dietPlanConfigured}
+              mealPlanSummary={mealPlan.data ? `${slotsPerWeek} repas / semaine` : null}
+              dietPlanSummary={
+                dietPlanConfigured
+                  ? `${dietComponentsCount} composant${dietComponentsCount > 1 ? 's' : ''}${
+                      dietRulesCount > 0
+                        ? ` · ${dietRulesCount} regle${dietRulesCount > 1 ? 's' : ''}`
+                        : ''
+                    }`
+                  : null
+              }
+              loading={mealPlan.isPending || myDietPlan.isPending}
+            />
+          </View>
         </View>
 
-        {/* Setup checklist (semaine type + plan alimentaire) */}
-        <SetupSection
-          mealPlanConfigured={!!mealPlan.data}
-          dietPlanConfigured={dietPlanConfigured}
-          mealPlanSummary={mealPlan.data ? `${slotsPerWeek} repas / semaine` : null}
-          dietPlanSummary={
-            dietPlanConfigured
-              ? `${dietComponentsCount} composant${dietComponentsCount > 1 ? 's' : ''}${
-                  dietRulesCount > 0
-                    ? ` · ${dietRulesCount} regle${dietRulesCount > 1 ? 's' : ''}`
-                    : ''
-                }`
-              : null
-          }
-          onMealPlanPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
-          onDietPlanPress={() => router.push('/(app)/(tabs)/planning/diet-plan')}
-        />
-
-        {/* Toggle vue + navigation periode */}
-        <View style={styles.toolbarRow}>
-          <SegmentedButtons
-            value={viewMode}
-            onValueChange={(v) => setViewMode(v as ViewMode)}
-            density="small"
-            style={{ flex: 1 }}
-            buttons={[
-              { value: 'month', label: 'Mois', icon: 'calendar-month-outline' },
-              { value: 'week', label: 'Semaine', icon: 'calendar-week-outline' },
-            ]}
-          />
-        </View>
         <View style={styles.navRow}>
           <IconButton icon="chevron-left" onPress={onPrev} />
           <TouchableRipple onPress={onToday} style={{ flex: 1 }} borderless>
@@ -352,63 +370,144 @@ export default function PlanningIndexScreen() {
           <View style={styles.loaderRow}>
             <ActivityIndicator size="small" color={theme.colors.primary} />
           </View>
-        ) : viewMode === 'month' ? (
-          <MonthGrid
-            cells={window.cells}
-            refDate={refDate}
-            mealCountByDate={mealCountByDate}
-            onPressCell={(date) =>
-              router.push({ pathname: '/(app)/(tabs)/planning/day/[date]', params: { date } })
-            }
-          />
         ) : (
-          <WeekList
-            cells={window.cells}
-            mealCountByDate={mealCountByDate}
-            onPressCell={(date) =>
-              router.push({ pathname: '/(app)/(tabs)/planning/day/[date]', params: { date } })
-            }
-          />
+          <View style={styles.swipeArea} {...panResponder.panHandlers}>
+            {viewMode === 'month' ? (
+              <MonthGrid
+                cells={window.cells}
+                refDate={refDate}
+                plannedDays={plannedDays}
+                ranges={ranges.data ?? []}
+                rangeStart={rangeStart}
+                rangeEnd={null}
+                onPressCell={onCellTap}
+                onLongPressCell={onCellLongPress}
+              />
+            ) : (
+              <WeekList
+                cells={window.cells}
+                plannedDays={plannedDays}
+                ranges={ranges.data ?? []}
+                rangeStart={rangeStart}
+                rangeEnd={null}
+                onPressCell={onCellTap}
+                onLongPressCell={onCellLongPress}
+              />
+            )}
+          </View>
         )}
 
-        {/* Actions sur la fenetre courante */}
-        <View style={styles.actionsRow}>
-          <Button
-            mode="contained"
-            icon="dice-multiple-outline"
-            onPress={onGenerateRandom}
-            loading={setMeals.isPending && !generateLlm.isPending}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
+        {/* Aide visuelle quand l'utilisateur a fait long-press sans encore
+            avoir tape la 2e cellule */}
+        {rangeStart && (
+          <Surface
+            elevation={0}
+            style={[styles.rangeHint, { backgroundColor: theme.colors.secondaryContainer }]}
           >
-            Aleatoire
-          </Button>
-          <Button
-            mode="contained-tonal"
-            icon="auto-fix"
-            onPress={onGenerateLlm}
-            loading={generateLlm.isPending}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            IA
-          </Button>
-          <Button
-            mode="outlined"
-            icon="delete-sweep-outline"
-            onPress={onClearWindow}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            Effacer
-          </Button>
-        </View>
-      </ScrollView>
+            <Text variant="bodySmall" style={{ color: theme.colors.onSecondaryContainer, flex: 1 }}>
+              Tapez la derniere date de votre plage pour ouvrir la vue d'edition.
+            </Text>
+            <Button mode="text" compact onPress={clearRange}>
+              Annuler
+            </Button>
+          </Surface>
+        )}
+      </View>
+
+      {/* Modale de naming a la creation d'une plage */}
+      <Portal>
+        <Dialog visible={!!pendingRange} onDismiss={onCancelRange}>
+          <Dialog.Title>Nommer la plage</Dialog.Title>
+          <Dialog.Content>
+            <Text variant="bodyMedium" style={{ marginBottom: 12 }}>
+              {pendingRange
+                ? `${formatDdMm(pendingRange.from)} → ${formatDdMm(pendingRange.to)}`
+                : ''}
+            </Text>
+            <TextInput
+              mode="outlined"
+              autoFocus
+              value={pendingName}
+              onChangeText={setPendingName}
+              placeholder="Ex. Semaine equilibree"
+              maxLength={80}
+              onSubmitEditing={onConfirmRange}
+              returnKeyType="done"
+            />
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={onCancelRange}>Annuler</Button>
+            <Button mode="contained" onPress={onConfirmRange} loading={createRange.isPending}>
+              Creer
+            </Button>
+          </Dialog.Actions>
+        </Dialog>
+      </Portal>
     </SafeAreaView>
   );
+}
+
+// ============================================================================
+// Helpers pour les bandes de plages dans le calendrier
+// ============================================================================
+
+/**
+ * Palette de couleurs pour les plages. Hue choisie pour rester lisible
+ * sur fond sage/cream + assurer une bonne distinction entre adjacentes.
+ */
+const RANGE_COLORS: { bg: string; text: string }[] = [
+  { bg: '#3F7D58', text: '#FFFFFF' }, // sage primary
+  { bg: '#C57148', text: '#FFFFFF' }, // terracotta
+  { bg: '#5B7CB1', text: '#FFFFFF' }, // bleu
+  { bg: '#B85C7E', text: '#FFFFFF' }, // rose
+  { bg: '#8B5CB8', text: '#FFFFFF' }, // violet
+  { bg: '#C9A227', text: '#FFFFFF' }, // jaune-or
+  { bg: '#5C8B83', text: '#FFFFFF' }, // teal
+  { bg: '#A05C3F', text: '#FFFFFF' }, // brun
+];
+
+function colorForRange(name: string) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  const idx = ((hash % RANGE_COLORS.length) + RANGE_COLORS.length) % RANGE_COLORS.length;
+  return RANGE_COLORS[idx] as { bg: string; text: string };
+}
+
+/**
+ * Pour une grille de cells (42 dates lundi-aligne), assigne a chaque plage
+ * un index de 'lane' (0, 1, 2...) tel que deux plages chevauchantes ne
+ * partagent pas la meme lane. Greedy par date_from.
+ *
+ * Retourne aussi pour chaque cellule la liste des bandes a afficher,
+ * indexees par lane.
+ */
+type RangeLane = { range: MealPlanRange; lane: number };
+
+function assignRangeLanes(
+  ranges: MealPlanRange[],
+  windowFrom: string,
+  windowTo: string,
+): RangeLane[] {
+  // Filtre les plages qui chevauchent la fenetre
+  const inWindow = ranges.filter((r) => !(r.dateTo < windowFrom || r.dateFrom > windowTo));
+  // Tri par date_from puis date_to (asc)
+  const sorted = [...inWindow].sort((a, b) => {
+    if (a.dateFrom !== b.dateFrom) return a.dateFrom < b.dateFrom ? -1 : 1;
+    return a.dateTo < b.dateTo ? -1 : 1;
+  });
+
+  /** lane occupee jusqu'a la date YYYY-MM-DD (inclus) */
+  const laneEnd: string[] = [];
+  const out: RangeLane[] = [];
+  for (const r of sorted) {
+    let lane = laneEnd.findIndex((endDate) => endDate < r.dateFrom);
+    if (lane === -1) {
+      lane = laneEnd.length;
+    }
+    laneEnd[lane] = r.dateTo;
+    out.push({ range: r, lane });
+  }
+  return out;
 }
 
 // ============================================================================
@@ -417,16 +516,94 @@ export default function PlanningIndexScreen() {
 function MonthGrid({
   cells,
   refDate,
-  mealCountByDate,
+  plannedDays,
+  ranges,
+  rangeStart,
+  rangeEnd,
   onPressCell,
+  onLongPressCell,
 }: {
   cells: string[];
   refDate: string;
-  mealCountByDate: Map<string, number>;
+  plannedDays: Set<string>;
+  ranges: MealPlanRange[];
+  rangeStart: string | null;
+  rangeEnd: string | null;
   onPressCell: (date: string) => void;
+  onLongPressCell: (date: string) => void;
 }) {
   const theme = useTheme();
   const today = todayIso();
+  const rangeFrom =
+    rangeStart && rangeEnd ? (rangeStart <= rangeEnd ? rangeStart : rangeEnd) : rangeStart;
+  const rangeTo = rangeStart && rangeEnd ? (rangeStart <= rangeEnd ? rangeEnd : rangeStart) : null;
+  const isInRange = (date: string) => {
+    if (!rangeFrom) return false;
+    if (!rangeTo) return date === rangeFrom;
+    return date >= rangeFrom && date <= rangeTo;
+  };
+
+  const windowFrom = cells[0] ?? '';
+  const windowTo = cells[cells.length - 1] ?? '';
+  const lanes = useMemo(
+    () => assignRangeLanes(ranges, windowFrom, windowTo),
+    [ranges, windowFrom, windowTo],
+  );
+
+  /**
+   * Pour une rangee donnee (7 dates consecutives), calcule la liste des
+   * 'segments' de bandes a dessiner en overlay. Chaque segment correspond
+   * a la portion d'une plage qui chevauche cette rangee.
+   *
+   * Un segment retourne :
+   *  - range
+   *  - lane (0..n)
+   *  - startCol (0..6) : 1ere colonne occupee dans la rangee
+   *  - spanCols (1..7) : nb de colonnes consecutives
+   *  - showLabel : true si le label doit etre affiche (1ere occurrence
+   *    visible dans la rangee, ou 1er jour de la plage)
+   */
+  type Segment = {
+    rangeId: string;
+    name: string;
+    color: { bg: string; text: string };
+    lane: number;
+    startCol: number;
+    spanCols: number;
+    showLabel: boolean;
+  };
+  const segmentsForRow = (rowCells: string[]): Segment[] => {
+    const rowFrom = rowCells[0] ?? '';
+    const rowTo = rowCells[rowCells.length - 1] ?? '';
+    const out: Segment[] = [];
+    for (const { range, lane } of lanes) {
+      if (range.dateTo < rowFrom || range.dateFrom > rowTo) continue;
+      const segStart = range.dateFrom > rowFrom ? range.dateFrom : rowFrom;
+      const segEnd = range.dateTo < rowTo ? range.dateTo : rowTo;
+      const startCol = rowCells.indexOf(segStart);
+      const endCol = rowCells.indexOf(segEnd);
+      if (startCol === -1 || endCol === -1) continue;
+      out.push({
+        rangeId: range.id,
+        name: range.name,
+        color: colorForRange(range.name),
+        lane,
+        startCol,
+        spanCols: endCol - startCol + 1,
+        // Affiche le label sur le 1er segment de la rangee (qui est aussi
+        // souvent le debut de la plage ou le lundi pour une plage qui
+        // continue depuis la rangee precedente).
+        showLabel: true,
+      });
+    }
+    return out;
+  };
+
+  const MAX_LANES_VISIBLE = 3;
+  const BAND_HEIGHT = 18;
+  const BAND_GAP = 3;
+  const BAND_TOP = 26; // espace reserve au numero du jour
+
   return (
     <View style={styles.monthGrid}>
       {/* Header weekdays */}
@@ -450,72 +627,128 @@ function MonthGrid({
       {Array.from({ length: 6 }).map((_, rowIdx) => {
         const rowCells = cells.slice(rowIdx * 7, rowIdx * 7 + 7);
         const rowKey = rowCells[0] ?? `row-${rowIdx}`;
+        const segments = segmentsForRow(rowCells);
+        const visibleSegments = segments.filter((s) => s.lane < MAX_LANES_VISIBLE);
+        // Pour chaque colonne, compte les overflow de plages au-dela des lanes visibles
+        const overflowByCol = new Array(7).fill(0);
+        for (const s of segments) {
+          if (s.lane < MAX_LANES_VISIBLE) continue;
+          for (let c = s.startCol; c < s.startCol + s.spanCols; c++) {
+            overflowByCol[c] = (overflowByCol[c] ?? 0) + 1;
+          }
+        }
         return (
-          <View key={rowKey} style={styles.monthRow}>
-            {rowCells.map((date) => {
-              const inMonth = isSameMonth(date, refDate);
-              const isToday = date === today;
-              const count = mealCountByDate.get(date) ?? 0;
-              return (
+          <View key={rowKey} style={styles.monthRowWrapper}>
+            <View style={[styles.monthRow, { flex: 1 }]}>
+              {rowCells.map((date) => {
+                const inMonth = isSameMonth(date, refDate);
+                const isToday = date === today;
+                const isPast = date < today;
+                const isPlanned = plannedDays.has(date);
+                const inSel = isInRange(date);
+                return (
+                  <TouchableRipple
+                    key={date}
+                    onPress={() => onPressCell(date)}
+                    onLongPress={() => onLongPressCell(date)}
+                    borderless
+                    style={[
+                      styles.monthCell,
+                      {
+                        backgroundColor: inSel
+                          ? theme.colors.tertiaryContainer
+                          : isToday
+                            ? theme.colors.primaryContainer
+                            : inMonth
+                              ? theme.colors.surface
+                              : 'transparent',
+                        borderWidth: inSel ? 1.5 : 0,
+                        borderColor: inSel ? theme.colors.tertiary : 'transparent',
+                        opacity: !inMonth ? 0.45 : isPast && !isToday ? 0.55 : 1,
+                      },
+                    ]}
+                  >
+                    <View style={styles.monthCellInner}>
+                      <View style={styles.monthCellTopRow}>
+                        <Text
+                          variant="bodyMedium"
+                          style={{
+                            fontWeight: isToday || inSel ? '800' : '600',
+                            color: inSel
+                              ? theme.colors.onTertiaryContainer
+                              : isToday
+                                ? theme.colors.onPrimaryContainer
+                                : inMonth
+                                  ? theme.colors.onSurface
+                                  : theme.colors.onSurfaceVariant,
+                          }}
+                        >
+                          {Number(date.slice(8, 10))}
+                        </Text>
+                        {isPlanned && (
+                          <View
+                            style={[
+                              styles.cellDot,
+                              {
+                                backgroundColor: inSel
+                                  ? theme.colors.tertiary
+                                  : isToday
+                                    ? theme.colors.onPrimaryContainer
+                                    : theme.colors.primary,
+                              },
+                            ]}
+                          />
+                        )}
+                      </View>
+                      {/* Compteur d'overflow (rendu DANS la cellule pour
+                          rester aligne avec la colonne, sous les bandes) */}
+                      {overflowByCol[rowCells.indexOf(date)] > 0 && (
+                        <Text
+                          variant="labelSmall"
+                          style={[styles.bandsOverflow, { color: theme.colors.onSurfaceVariant }]}
+                        >
+                          +{overflowByCol[rowCells.indexOf(date)]}
+                        </Text>
+                      )}
+                    </View>
+                  </TouchableRipple>
+                );
+              })}
+            </View>
+            {/* Overlay : bandes continues qui s'etalent sur plusieurs cellules.
+                pointerEvents=box-none laisse les taps passer aux cellules
+                en-dessous, sauf sur les bandes elles-memes. */}
+            <View style={styles.bandsOverlay} pointerEvents="box-none">
+              {visibleSegments.map((s) => (
                 <TouchableRipple
-                  key={date}
-                  onPress={() => onPressCell(date)}
+                  key={`${s.rangeId}-${s.startCol}`}
+                  onPress={() => {
+                    // Tap sur une bande : ouvre la vue range de cette plage.
+                    const r = ranges.find((x) => x.id === s.rangeId);
+                    if (r) router.push(`/(app)/(tabs)/planning/range/${r.dateFrom}/${r.dateTo}`);
+                  }}
                   borderless
                   style={[
-                    styles.monthCell,
+                    styles.band,
                     {
-                      backgroundColor: isToday
-                        ? theme.colors.primaryContainer
-                        : inMonth
-                          ? theme.colors.surface
-                          : 'transparent',
+                      backgroundColor: s.color.bg,
+                      left: `${(s.startCol / 7) * 100}%`,
+                      width: `${(s.spanCols / 7) * 100}%`,
+                      top: BAND_TOP + s.lane * (BAND_HEIGHT + BAND_GAP),
+                      height: BAND_HEIGHT,
                     },
                   ]}
                 >
-                  <View style={styles.monthCellInner}>
-                    <Text
-                      variant="bodyMedium"
-                      style={{
-                        fontWeight: isToday ? '800' : '600',
-                        color: isToday
-                          ? theme.colors.onPrimaryContainer
-                          : inMonth
-                            ? theme.colors.onSurface
-                            : theme.colors.onSurfaceVariant,
-                        opacity: inMonth ? 1 : 0.45,
-                      }}
-                    >
-                      {Number(date.slice(8, 10))}
+                  {s.showLabel ? (
+                    <Text numberOfLines={1} style={[styles.bandText, { color: s.color.text }]}>
+                      {s.name}
                     </Text>
-                    {count > 0 && (
-                      <View
-                        style={[
-                          styles.cellBadge,
-                          {
-                            backgroundColor: isToday
-                              ? theme.colors.onPrimaryContainer
-                              : theme.colors.primary,
-                          },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.cellBadgeText,
-                            {
-                              color: isToday
-                                ? theme.colors.primaryContainer
-                                : theme.colors.onPrimary,
-                            },
-                          ]}
-                        >
-                          {count}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
+                  ) : (
+                    <View />
+                  )}
                 </TouchableRipple>
-              );
-            })}
+              ))}
+            </View>
           </View>
         );
       })}
@@ -528,30 +761,62 @@ function MonthGrid({
 // ============================================================================
 function WeekList({
   cells,
-  mealCountByDate,
+  plannedDays,
+  ranges,
+  rangeStart,
+  rangeEnd,
   onPressCell,
+  onLongPressCell,
 }: {
   cells: string[];
-  mealCountByDate: Map<string, number>;
+  plannedDays: Set<string>;
+  ranges: MealPlanRange[];
+  rangeStart: string | null;
+  rangeEnd: string | null;
   onPressCell: (date: string) => void;
+  onLongPressCell: (date: string) => void;
 }) {
   const theme = useTheme();
   const today = todayIso();
+  const rangeFrom =
+    rangeStart && rangeEnd ? (rangeStart <= rangeEnd ? rangeStart : rangeEnd) : rangeStart;
+  const rangeTo = rangeStart && rangeEnd ? (rangeStart <= rangeEnd ? rangeEnd : rangeStart) : null;
+  const isInRange = (date: string) => {
+    if (!rangeFrom) return false;
+    if (!rangeTo) return date === rangeFrom;
+    return date >= rangeFrom && date <= rangeTo;
+  };
+  const rangesForDate = (date: string) =>
+    ranges.filter((r) => date >= r.dateFrom && date <= r.dateTo);
+
   return (
-    <View style={{ gap: 6 }}>
+    <View style={{ flex: 1, gap: 6, backgroundColor: 'red', height: '100%' }}>
       {cells.map((date) => {
         const isToday = date === today;
-        const count = mealCountByDate.get(date) ?? 0;
+        const isPast = date < today;
+        const isPlanned = plannedDays.has(date);
         const wd = WEEKDAYS[(new Date(date).getDay() + 6) % 7] as (typeof WEEKDAYS)[number];
+        const inSel = isInRange(date);
+        const dayRanges = rangesForDate(date);
         return (
           <TouchableRipple
             key={date}
             onPress={() => onPressCell(date)}
+            onLongPress={() => onLongPressCell(date)}
             borderless
             style={[
               styles.weekRow,
               {
-                backgroundColor: isToday ? theme.colors.primaryContainer : theme.colors.surface,
+                backgroundColor: inSel
+                  ? theme.colors.tertiaryContainer
+                  : isToday
+                    ? theme.colors.primaryContainer
+                    : isPlanned
+                      ? theme.colors.primaryContainer
+                      : theme.colors.surface,
+                borderWidth: inSel ? 1.5 : 0,
+                borderColor: inSel ? theme.colors.tertiary : 'transparent',
+                opacity: isPast && !isToday ? 0.55 : 1,
               },
             ]}
           >
@@ -594,10 +859,28 @@ function WeekList({
                   variant="bodySmall"
                   style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
                 >
-                  {count === 0
-                    ? 'Aucun repas planifie'
-                    : `${count} repas planifie${count > 1 ? 's' : ''}`}
+                  {isPlanned ? 'Repas planifies' : 'Aucun repas planifie'}
                 </Text>
+                {dayRanges.length > 0 && (
+                  <View style={styles.weekRangesRow}>
+                    {dayRanges.map((r) => {
+                      const color = colorForRange(r.name);
+                      return (
+                        <View
+                          key={r.id}
+                          style={[styles.weekRangeChip, { backgroundColor: color.bg }]}
+                        >
+                          <Text
+                            numberOfLines={1}
+                            style={[styles.weekRangeChipText, { color: color.text }]}
+                          >
+                            {r.name}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                )}
               </View>
               <Text style={[styles.weekChevron, { color: theme.colors.onSurfaceVariant }]}>›</Text>
             </View>
@@ -605,223 +888,6 @@ function WeekList({
         );
       })}
     </View>
-  );
-}
-
-// ============================================================================
-// SetupSection (extrait de l'ancien index, identique)
-// ============================================================================
-function SetupSection({
-  mealPlanConfigured,
-  dietPlanConfigured,
-  mealPlanSummary,
-  dietPlanSummary,
-  onMealPlanPress,
-  onDietPlanPress,
-}: {
-  mealPlanConfigured: boolean;
-  dietPlanConfigured: boolean;
-  mealPlanSummary: string | null;
-  dietPlanSummary: string | null;
-  onMealPlanPress: () => void;
-  onDietPlanPress: () => void;
-}) {
-  const theme = useTheme();
-
-  if (mealPlanConfigured && dietPlanConfigured) {
-    return (
-      <Surface
-        elevation={0}
-        style={[styles.compactCard, { backgroundColor: theme.colors.surface }]}
-      >
-        <View style={styles.compactRow}>
-          <View style={styles.compactItem}>
-            <Text
-              variant="labelSmall"
-              style={[styles.compactLabel, { color: theme.colors.onSurfaceVariant }]}
-            >
-              Semaine type
-            </Text>
-            <Text variant="bodyMedium" style={styles.compactValue}>
-              {mealPlanSummary}
-            </Text>
-          </View>
-          <View style={[styles.compactDivider, { backgroundColor: theme.colors.outlineVariant }]} />
-          <View style={styles.compactItem}>
-            <Text
-              variant="labelSmall"
-              style={[styles.compactLabel, { color: theme.colors.onSurfaceVariant }]}
-            >
-              Plan alimentaire
-            </Text>
-            <Text variant="bodyMedium" style={styles.compactValue}>
-              {dietPlanSummary}
-            </Text>
-          </View>
-        </View>
-        <View style={styles.compactActions}>
-          <Button mode="text" compact onPress={onMealPlanPress}>
-            Semaine type
-          </Button>
-          <Button mode="text" compact onPress={onDietPlanPress}>
-            Plan alimentaire
-          </Button>
-        </View>
-      </Surface>
-    );
-  }
-
-  const totalSteps = 2;
-  const doneSteps = (mealPlanConfigured ? 1 : 0) + (dietPlanConfigured ? 1 : 0);
-  const progressPct = (doneSteps / totalSteps) * 100;
-
-  return (
-    <Surface elevation={0} style={[styles.setupCard, { backgroundColor: theme.colors.surface }]}>
-      <View style={styles.setupHeader}>
-        <View style={{ flex: 1 }}>
-          <Text variant="titleMedium" style={styles.setupTitle}>
-            Configurez votre foyer
-          </Text>
-          <Text
-            variant="bodySmall"
-            style={[styles.setupSubtitle, { color: theme.colors.onSurfaceVariant }]}
-          >
-            Definissez votre rythme de repas pour generer des plannings adaptes.
-          </Text>
-        </View>
-        <View style={styles.setupProgressBlock}>
-          <Text
-            variant="labelMedium"
-            style={[styles.setupProgressText, { color: theme.colors.primary }]}
-          >
-            {doneSteps}/{totalSteps}
-          </Text>
-        </View>
-      </View>
-      <View style={[styles.progressBar, { backgroundColor: theme.colors.surfaceVariant }]}>
-        <View
-          style={[
-            styles.progressBarFill,
-            { width: `${progressPct}%`, backgroundColor: theme.colors.primary },
-          ]}
-        />
-      </View>
-      <View style={styles.stepsList}>
-        <SetupStep
-          icon="calendar-week"
-          title="Semaine type"
-          description={
-            mealPlanConfigured
-              ? (mealPlanSummary ?? 'Configure')
-              : 'Quels repas planifier chaque jour de la semaine ?'
-          }
-          done={mealPlanConfigured}
-          required
-          onPress={onMealPlanPress}
-        />
-        <SetupStep
-          icon="leaf"
-          title="Plan alimentaire"
-          description={
-            dietPlanConfigured
-              ? (dietPlanSummary ?? 'Configure')
-              : 'Composants attendus (legumes, proteine, feculents...)'
-          }
-          done={dietPlanConfigured}
-          required={false}
-          locked={!mealPlanConfigured}
-          onPress={onDietPlanPress}
-        />
-      </View>
-    </Surface>
-  );
-}
-
-function SetupStep({
-  icon,
-  title,
-  description,
-  done,
-  required,
-  locked,
-  onPress,
-}: {
-  icon: string;
-  title: string;
-  description: string;
-  done: boolean;
-  required: boolean;
-  locked?: boolean;
-  onPress: () => void;
-}) {
-  const theme = useTheme();
-  const bubbleColor = done
-    ? theme.colors.primary
-    : locked
-      ? theme.colors.surfaceVariant
-      : theme.colors.primaryContainer;
-  const iconColor = done
-    ? theme.colors.onPrimary
-    : locked
-      ? theme.colors.onSurfaceVariant
-      : theme.colors.primary;
-
-  return (
-    <TouchableRipple
-      onPress={locked ? undefined : onPress}
-      disabled={locked}
-      borderless
-      style={[styles.step, locked && styles.stepLocked]}
-    >
-      <View style={styles.stepInner}>
-        <View style={[styles.stepBubble, { backgroundColor: bubbleColor }]}>
-          {done ? (
-            <Text style={[styles.stepCheck, { color: iconColor }]}>✓</Text>
-          ) : (
-            <IconButton
-              icon={locked ? 'lock-outline' : icon}
-              size={18}
-              iconColor={iconColor}
-              style={styles.stepBubbleIcon}
-              disabled
-            />
-          )}
-        </View>
-        <View style={styles.stepBody}>
-          <View style={styles.stepTitleRow}>
-            <Text variant="titleSmall" style={styles.stepTitle}>
-              {title}
-            </Text>
-            {!required && !done && (
-              <Text
-                variant="labelSmall"
-                style={[styles.stepBadge, { color: theme.colors.onSurfaceVariant }]}
-              >
-                Optionnel
-              </Text>
-            )}
-            {done && (
-              <Text
-                variant="labelSmall"
-                style={[styles.stepBadge, { color: theme.colors.primary, fontWeight: '700' }]}
-              >
-                Pret
-              </Text>
-            )}
-          </View>
-          <Text
-            variant="bodySmall"
-            numberOfLines={2}
-            style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
-          >
-            {description}
-          </Text>
-        </View>
-        {!locked && (
-          <Text style={[styles.stepChevron, { color: theme.colors.onSurfaceVariant }]}>›</Text>
-        )}
-      </View>
-    </TouchableRipple>
   );
 }
 
@@ -840,117 +906,123 @@ function addDaysSafe(s: string, n: number): string {
 }
 
 function formatRangeLabel(from: string, to: string): string {
-  const f = new Date(`${from}T00:00:00`);
-  const t = new Date(`${to}T00:00:00`);
-  const fmt = (d: Date) =>
-    `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
-  return `${fmt(f)} → ${fmt(t)}`;
+  return `${formatDdMm(from)} → ${formatDdMm(to)}`;
+}
+
+function formatDdMm(s: string): string {
+  const d = new Date(`${s}T00:00:00`);
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { padding: 16, gap: 14, paddingBottom: 32 },
-  header: { gap: 2, paddingTop: 4 },
+  container: { flex: 1, paddingHorizontal: 16, paddingTop: 4, gap: 12 },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  titleRowRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   title: { fontWeight: '700' },
 
-  toolbarRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   navRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: -4,
+    marginTop: -8,
+    marginBottom: -4,
   },
   navLabel: { textAlign: 'center', fontWeight: '700' },
 
   loaderRow: { padding: 20, alignItems: 'center' },
+  swipeArea: { flex: 1, backgroundColor: 'yellow' },
 
-  // Month grid
-  monthGrid: { gap: 4 },
-  monthRow: { flexDirection: 'row', gap: 4 },
+  // Month grid : prend tout l'espace vertical disponible
+  monthGrid: { flex: 1, gap: 1 },
+  monthRow: { flexDirection: 'row', gap: 0 },
   monthHeaderCell: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 4,
+    paddingVertical: 2,
   },
   monthCell: {
     flex: 1,
-    aspectRatio: 1,
-    borderRadius: 10,
-    overflow: 'hidden',
+    borderRadius: 0,
   },
   monthCellInner: {
     flex: 1,
-    padding: 6,
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
+    paddingTop: 4,
+    paddingHorizontal: 2,
+    paddingBottom: 2,
   },
-  cellBadge: {
-    minWidth: 18,
-    height: 18,
-    paddingHorizontal: 4,
-    borderRadius: 9,
+  monthCellTopRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    alignSelf: 'flex-end',
+    justifyContent: 'space-between',
+    paddingHorizontal: 4,
   },
-  cellBadgeText: { fontSize: 10, fontWeight: '800' },
+  cellDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+  },
+  // Wrapper d'une rangee : permet l'overlay absolu des bandes par-dessus
+  // les cellules. Position relative pour ancrer l'overlay. Flex 1 pour que
+  // les 6 rangees se repartissent l'espace vertical disponible. maxHeight
+  // pour eviter des cellules trop beantes sur grand ecran.
+  monthRowWrapper: { position: 'relative', flex: 1, maxHeight: 100 },
+  bandsOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  band: {
+    position: 'absolute',
+    borderRadius: 3,
+    paddingHorizontal: 4,
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  bandText: { fontSize: 10, fontWeight: '700', letterSpacing: 0.2 },
+  bandsOverflow: { fontSize: 10, fontWeight: '700', alignSelf: 'flex-end', paddingTop: 2 },
 
   // Week list
-  weekRow: { borderRadius: 14, padding: 10 },
-  weekRowInner: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  weekDayBubble: {
-    width: 56,
-    height: 56,
+  weekRow: {
+    flex: 1,
     borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  weekRowInner: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  weekDayBubble: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 0,
   },
-  weekChevron: { fontSize: 24, paddingHorizontal: 4 },
+  weekChevron: { fontSize: 24, paddingHorizontal: 4, alignSelf: 'center' },
+  weekRangesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
+  weekRangeChip: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4, maxWidth: 160 },
+  weekRangeChipText: { fontSize: 11, fontWeight: '700' },
 
   // Actions row
   actionsRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
   flexBtn: { flex: 1, borderRadius: 12 },
   btnContent: { paddingVertical: 4 },
 
-  // SetupSection (copie de l'ancien index)
-  setupCard: { padding: 16, borderRadius: 18, gap: 12 },
-  setupHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
-  setupTitle: { fontWeight: '700' },
-  setupSubtitle: { marginTop: 4, lineHeight: 18 },
-  setupProgressBlock: { minWidth: 36, alignItems: 'flex-end' },
-  setupProgressText: { fontWeight: '800', fontSize: 14 },
-  progressBar: { height: 6, borderRadius: 3, overflow: 'hidden' },
-  progressBarFill: { height: '100%', borderRadius: 3 },
-  stepsList: { gap: 4, marginTop: 4 },
-  step: { borderRadius: 12 },
-  stepLocked: { opacity: 0.55 },
-  stepInner: {
+  // Hint quand long-press en cours (selection en attente du 2e tap)
+  rangeHint: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 4,
-  },
-  stepBubble: {
-    width: 36,
-    height: 36,
+    paddingLeft: 14,
+    paddingRight: 6,
+    paddingVertical: 6,
     borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
+    gap: 8,
   },
-  stepBubbleIcon: { margin: 0 },
-  stepCheck: { fontSize: 18, fontWeight: '800' },
-  stepBody: { flex: 1 },
-  stepTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  stepTitle: { fontWeight: '700' },
-  stepBadge: { fontSize: 10, letterSpacing: 0.5, textTransform: 'uppercase' },
-  stepChevron: { fontSize: 22, lineHeight: 22, paddingHorizontal: 4 },
-  compactCard: { padding: 14, borderRadius: 16, gap: 8 },
-  compactRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  compactItem: { flex: 1 },
-  compactLabel: { letterSpacing: 0.5, textTransform: 'uppercase', fontSize: 10 },
-  compactValue: { fontWeight: '700', marginTop: 2 },
-  compactDivider: { width: 1, height: 32 },
-  compactActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 4, marginTop: 4 },
 });
