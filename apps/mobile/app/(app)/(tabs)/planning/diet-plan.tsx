@@ -615,38 +615,43 @@ export default function DietPlanScreen() {
       {/* Preview de l'import depuis photo : l'utilisateur valide l'extraction
           IA avant qu'elle ecrase le diet plan courant. */}
       <Portal>
-        <Dialog visible={!!importPreview} onDismiss={onCancelImport} style={{ maxHeight: '85%' }}>
+        <Dialog visible={!!importPreview} onDismiss={onCancelImport}>
           <Dialog.Title>Plan extrait par l'IA</Dialog.Title>
-          <Dialog.Content>
-            {importPreview?.summary && (
-              <Text
-                variant="bodySmall"
-                style={{ color: theme.colors.onSurfaceVariant, marginBottom: 8 }}
-              >
-                {importPreview.summary}
+          {/* Header (summary + confidence) hors de la ScrollArea pour rester
+              toujours visible. */}
+          {(importPreview?.summary || importPreview?.confidence != null) && (
+            <View style={{ paddingHorizontal: 24, paddingBottom: 8 }}>
+              {importPreview?.summary && (
+                <Text
+                  variant="bodySmall"
+                  style={{ color: theme.colors.onSurfaceVariant, marginBottom: 4 }}
+                >
+                  {importPreview.summary}
+                </Text>
+              )}
+              {importPreview?.confidence != null && (
+                <Text
+                  variant="labelSmall"
+                  style={{
+                    color:
+                      importPreview.confidence > 0.7
+                        ? theme.colors.primary
+                        : importPreview.confidence > 0.4
+                          ? theme.colors.tertiary
+                          : theme.colors.error,
+                    fontWeight: '700',
+                  }}
+                >
+                  Confiance : {Math.round(importPreview.confidence * 100)}%
+                </Text>
+              )}
+            </View>
+          )}
+          <Dialog.ScrollArea style={{ maxHeight: 320, paddingHorizontal: 24 }}>
+            <ScrollView>
+              <Text variant="bodyMedium" style={{ marginBottom: 4, fontWeight: '700' }}>
+                Apercu :
               </Text>
-            )}
-            {importPreview?.confidence != null && (
-              <Text
-                variant="labelSmall"
-                style={{
-                  color:
-                    importPreview.confidence > 0.7
-                      ? theme.colors.primary
-                      : importPreview.confidence > 0.4
-                        ? theme.colors.tertiary
-                        : theme.colors.error,
-                  marginBottom: 8,
-                  fontWeight: '700',
-                }}
-              >
-                Confiance : {Math.round(importPreview.confidence * 100)}%
-              </Text>
-            )}
-            <Text variant="bodyMedium" style={{ marginBottom: 4, fontWeight: '700' }}>
-              Apercu :
-            </Text>
-            <ScrollView style={{ maxHeight: 360 }}>
               {importPreview &&
                 Object.entries(importPreview.dietPlan.slots)
                   .filter(([, comps]) => (comps?.length ?? 0) > 0)
@@ -684,10 +689,12 @@ export default function DietPlanScreen() {
                 </View>
               )}
             </ScrollView>
-            <HelperText type="info" visible style={{ marginTop: 8 }}>
+          </Dialog.ScrollArea>
+          <View style={{ paddingHorizontal: 24, paddingTop: 4 }}>
+            <HelperText type="info" visible>
               Valider remplace votre plan actuel. Vous pourrez le modifier ensuite.
             </HelperText>
-          </Dialog.Content>
+          </View>
           <Dialog.Actions>
             <Button onPress={onCancelImport}>Annuler</Button>
             <Button mode="contained" onPress={onConfirmImport}>
@@ -794,18 +801,6 @@ function ComponentEditor({
   const updateAlt = (idx: number, patch: Partial<DietAlternative>) => {
     setAlternatives((cur) => cur.map((a, i) => (i === idx ? { ...a, ...patch } : a)));
   };
-  const addAlt = () =>
-    setAlternatives((cur) => [
-      ...cur,
-      {
-        category: 'autre',
-        label: '',
-        qtyMin: null,
-        qtyMax: null,
-        unit: 'g',
-        _uid: `alt-${Date.now()}-${cur.length}`,
-      },
-    ]);
   const removeAlt = (idx: number) =>
     setAlternatives((cur) => (cur.length === 1 ? cur : cur.filter((_, i) => i !== idx)));
 
@@ -841,7 +836,7 @@ function ComponentEditor({
         style={[styles.dialog, { backgroundColor: theme.colors.background }]}
       >
         <Dialog.Title>{existing ? 'Modifier le composant' : 'Nouveau composant'}</Dialog.Title>
-        <Dialog.ScrollArea style={{ maxHeight: 460, paddingHorizontal: 0 }}>
+        <Dialog.ScrollArea style={{ maxHeight: '60%', paddingHorizontal: 0 }}>
           <ScrollView
             contentContainerStyle={styles.dialogScroll}
             keyboardShouldPersistTaps="handled"
@@ -1008,10 +1003,6 @@ function ComponentEditor({
                 </ScrollView>
               </Surface>
             ))}
-
-            <Button mode="text" icon="plus" onPress={addAlt}>
-              Ajouter une alternative
-            </Button>
 
             <TextInput
               mode="outlined"

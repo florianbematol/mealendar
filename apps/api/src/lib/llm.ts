@@ -778,6 +778,34 @@ function normalizeCategory(raw: unknown): string {
 }
 
 /**
+ * Nettoie un label en lui retirant les preffixes/suffixes de quantite
+ * que le LLM colle parfois dedans :
+ *  - "50g de pain"      -> "pain"
+ *  - "100-150g viande"  -> "viande"
+ *  - "2 oeufs"          -> "oeufs"
+ *  - "Pates 80g"        -> "Pates"
+ *
+ * Si le label devient vide apres nettoyage, on garde l'original (pour ne
+ * pas perdre l'info).
+ */
+function cleanQtyFromLabel(label: string): string {
+  let cleaned = label.trim();
+  // Pattern debut : "<num>[-<num>]?<unit>(de )?"
+  // Ex : "50g de ", "100-150g ", "2 ", "200ml "
+  const prefixRe =
+    /^(\d+(?:[.,]\d+)?(?:\s*[-\u2013]\s*\d+(?:[.,]\d+)?)?\s*(?:g|kg|ml|cl|l|mg|piece|pieces|portion|portions|c\.?\s*a\.?\s*s|c\.?\s*a\.?\s*c|cas|cac)\s*(?:de\s+|d['\u2019])?)/i;
+  cleaned = cleaned.replace(prefixRe, '');
+  // Pattern fin (au cas ou le LLM mette la qty apres) : " <num><unit>"
+  const suffixRe =
+    /\s+(\d+(?:[.,]\d+)?(?:\s*[-\u2013]\s*\d+(?:[.,]\d+)?)?\s*(?:g|kg|ml|cl|l|mg|piece|pieces|portion|portions|c\.?\s*a\.?\s*s|c\.?\s*a\.?\s*c|cas|cac))$/i;
+  cleaned = cleaned.replace(suffixRe, '');
+  cleaned = cleaned.trim();
+  if (!cleaned) return label.trim();
+  // Capitalise la 1ere lettre
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+/**
  * Normalise un composant tel que renvoye par le LLM :
  *  - genere un id si absent
  *  - garantit un tableau alternatives (au minimum vide)
@@ -798,16 +826,19 @@ function normalizeComponent(raw: unknown, fallbackIdPrefix: string, idx: number)
   const alternatives = altsRaw.map((a) => {
     if (!a || typeof a !== 'object') return { category: 'autre', label: 'Sans titre' };
     const ar = a as Record<string, unknown>;
+    const rawLabel = typeof ar.label === 'string' && ar.label.trim() ? ar.label : 'Sans titre';
     return {
       ...ar,
       category: normalizeCategory(ar.category),
-      label: typeof ar.label === 'string' && ar.label.trim() ? ar.label : 'Sans titre',
+      // Nettoie les quantites collees dans le label par le LLM (ex "50g de pain")
+      label: cleanQtyFromLabel(rawLabel),
     };
   });
+  const compLabel = typeof c.label === 'string' && c.label.trim() ? c.label : 'Sans titre';
   return {
     ...c,
     id: typeof c.id === 'string' && c.id.trim() ? c.id : `${fallbackIdPrefix}-${idx}`,
-    label: typeof c.label === 'string' && c.label.trim() ? c.label : 'Sans titre',
+    label: cleanQtyFromLabel(compLabel),
     required: typeof c.required === 'boolean' ? c.required : true,
     alternatives:
       alternatives.length > 0
@@ -815,7 +846,7 @@ function normalizeComponent(raw: unknown, fallbackIdPrefix: string, idx: number)
         : [
             {
               category: 'autre',
-              label: typeof c.label === 'string' && c.label.trim() ? c.label : 'Element',
+              label: cleanQtyFromLabel(compLabel === 'Sans titre' ? 'Element' : compLabel),
             },
           ],
   };
