@@ -654,27 +654,46 @@ Schema attendu :
 
 Chaque element [...] est un "composant" :
 {
-  "id": "string-court-unique",
-  "label": "Nom du composant (ex: 'Proteine', 'Legumes')",
+  "id": "c-<3 chiffres aleatoires>",
+  "label": "Nom du composant en francais (ex: 'Proteine', 'Legumes', 'Feculents')",
   "required": true,
   "alternatives": [
     {
-      "category": "protein|vegetable|fruit|carb|dairy|fat|drink|other",
-      "label": "Nom de l'alternative (ex: 'Viande', '2 oeufs')",
+      "category": "<une valeur EXACTE de la liste ci-dessous>",
+      "label": "Nom de l'alternative en francais (ex: 'Viande', '2 oeufs', 'Pates')",
       "qtyMin": number | null,
       "qtyMax": number | null,
-      "unit": "g|ml|piece|c.a.s|c.a.c|portion" | null,
+      "unit": "g" | "ml" | "piece" | "c.a.s" | "c.a.c" | "portion" | null,
       "note": "string courte" | null
     }
   ],
   "note": "string courte" | null
 }
 
+CATEGORIES AUTORISEES (utilise UNIQUEMENT ces valeurs en francais sans accents pour le champ "category") :
+- "legumes"          (legumes verts, crudites, salade, ratatouille...)
+- "fruit"            (fruits frais, compote sans sucre)
+- "viande"           (boeuf, volaille, porc, agneau...)
+- "poisson"          (poisson, fruits de mer)
+- "oeuf"             (oeufs sous toutes formes)
+- "legumineuse"      (lentilles, pois chiches, haricots secs, tofu)
+- "feculent"         (pates, riz, semoule, pommes de terre, quinoa)
+- "pain"             (pain, biscottes)
+- "produit_laitier"  (yaourt, fromage blanc, lait, kefir)
+- "fromage"          (fromages a pate dure ou molle)
+- "fruits_a_coque"   (amandes, noix, noisettes...)
+- "matiere_grasse"   (huile, beurre, margarine)
+- "sucre"            (miel, confiture, sucre, chocolat noir)
+- "autre"            (boisson, eau, the, cafe, ou tout ce qui ne rentre pas ailleurs)
+
+NE JAMAIS utiliser de valeurs anglaises comme "protein", "carb", "dairy", "fat", "vegetable", "drink", "other". Mappe toujours vers les categories francaises ci-dessus.
+
 Regles :
 - Les slots: 'breakfast' (petit-dej), 'lunch' (dejeuner), 'snack' (gouter), 'dinner' (diner). N'invente pas de slot.
 - Les composants doivent etre orientes "Mealendar" : groupes logiques (Proteine, Legumes, Feculents, Matiere grasse, Produit laitier, Fruit, Boisson...).
 - Les "alternatives" sont les substituts equivalents pour ce composant (ex: "Viande 100g OU Poisson 150g OU 2 oeufs").
-- Les regles globales (huile, eau, etc.) vont dans dailyRules.
+- CHAQUE composant doit avoir un "id" string-unique court (ex: "c-001", "c-002") ET un tableau "alternatives" non vide. Meme dans dailyRules.
+- Les regles journalieres (huile, eau, etc.) vont dans dailyRules au format de composant complet (avec id, label, required, alternatives).
 - Si une info est ambigue ou illisible, mets-la quand meme avec une qty nulle plutot que de l'omettre.
 - Si tu ne reconnais aucun plan alimentaire dans l'image, renvoie { "slots": {}, "dailyRules": [], "summary": "Aucun plan alimentaire detecte", "confidence": 0 }.
 - N'inclus AUCUN texte hors du JSON. Pas de markdown, pas de \`\`\`json.`;
@@ -686,6 +705,144 @@ type ParsedDietPlan = {
   summary?: string;
   confidence?: number;
 };
+
+/**
+ * Mapping des categories EN/synonymes -> categories FR du schema Mealendar.
+ * Le LLM produit parfois des termes anglais malgre le prompt ; on normalise.
+ */
+const CATEGORY_NORMALIZE: Record<string, string> = {
+  // anglais
+  protein: 'viande',
+  proteins: 'viande',
+  meat: 'viande',
+  fish: 'poisson',
+  egg: 'oeuf',
+  eggs: 'oeuf',
+  dairy: 'produit_laitier',
+  cheese: 'fromage',
+  vegetable: 'legumes',
+  vegetables: 'legumes',
+  veggie: 'legumes',
+  veggies: 'legumes',
+  fruit: 'fruit',
+  fruits: 'fruit',
+  carb: 'feculent',
+  carbs: 'feculent',
+  carbohydrate: 'feculent',
+  carbohydrates: 'feculent',
+  starch: 'feculent',
+  bread: 'pain',
+  legumineuses: 'legumineuse',
+  pulse: 'legumineuse',
+  pulses: 'legumineuse',
+  fat: 'matiere_grasse',
+  fats: 'matiere_grasse',
+  oil: 'matiere_grasse',
+  nut: 'fruits_a_coque',
+  nuts: 'fruits_a_coque',
+  sugar: 'sucre',
+  sweet: 'sucre',
+  drink: 'autre',
+  beverage: 'autre',
+  water: 'autre',
+  other: 'autre',
+  // FR variantes/typos
+  legume: 'legumes',
+  produit_laitiers: 'produit_laitier',
+  produits_laitiers: 'produit_laitier',
+  matieres_grasses: 'matiere_grasse',
+};
+
+const VALID_CATEGORIES = new Set([
+  'legumes',
+  'fruit',
+  'viande',
+  'poisson',
+  'oeuf',
+  'legumineuse',
+  'feculent',
+  'pain',
+  'produit_laitier',
+  'fromage',
+  'fruits_a_coque',
+  'matiere_grasse',
+  'sucre',
+  'autre',
+]);
+
+function normalizeCategory(raw: unknown): string {
+  if (typeof raw !== 'string') return 'autre';
+  const lower = raw.trim().toLowerCase();
+  if (VALID_CATEGORIES.has(lower)) return lower;
+  return CATEGORY_NORMALIZE[lower] ?? 'autre';
+}
+
+/**
+ * Normalise un composant tel que renvoye par le LLM :
+ *  - genere un id si absent
+ *  - garantit un tableau alternatives (au minimum vide)
+ *  - normalise category (EN -> FR)
+ *  - force required a true par defaut
+ */
+function normalizeComponent(raw: unknown, fallbackIdPrefix: string, idx: number): unknown {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: `${fallbackIdPrefix}-${idx}`,
+      label: 'Sans titre',
+      required: true,
+      alternatives: [],
+    };
+  }
+  const c = raw as Record<string, unknown>;
+  const altsRaw = Array.isArray(c.alternatives) ? c.alternatives : [];
+  const alternatives = altsRaw.map((a) => {
+    if (!a || typeof a !== 'object') return { category: 'autre', label: 'Sans titre' };
+    const ar = a as Record<string, unknown>;
+    return {
+      ...ar,
+      category: normalizeCategory(ar.category),
+      label: typeof ar.label === 'string' && ar.label.trim() ? ar.label : 'Sans titre',
+    };
+  });
+  return {
+    ...c,
+    id: typeof c.id === 'string' && c.id.trim() ? c.id : `${fallbackIdPrefix}-${idx}`,
+    label: typeof c.label === 'string' && c.label.trim() ? c.label : 'Sans titre',
+    required: typeof c.required === 'boolean' ? c.required : true,
+    alternatives:
+      alternatives.length > 0
+        ? alternatives
+        : [
+            {
+              category: 'autre',
+              label: typeof c.label === 'string' && c.label.trim() ? c.label : 'Element',
+            },
+          ],
+  };
+}
+
+/**
+ * Normalise tout le DietPlan extrait : applique normalizeComponent sur
+ * chaque slot et chaque dailyRule. Retourne un objet pret pour la
+ * validation Zod.
+ */
+export function normalizeParsedDietPlan(parsed: ParsedDietPlan): {
+  slots: Record<string, unknown[]>;
+  dailyRules: unknown[];
+  note?: string | null;
+} {
+  const slots: Record<string, unknown[]> = {};
+  for (const [key, comps] of Object.entries(parsed.slots ?? {})) {
+    if (!Array.isArray(comps)) continue;
+    slots[key] = comps.map((c, i) => normalizeComponent(c, `s-${key}`, i));
+  }
+  const dailyRules = (parsed.dailyRules ?? []).map((c, i) => normalizeComponent(c, 'd', i));
+  return {
+    slots,
+    dailyRules,
+    note: parsed.note ?? null,
+  };
+}
 
 /**
  * Appel Gemini Vision pour extraire un plan alimentaire depuis une image.

@@ -21,6 +21,7 @@ import {
   LlmNotConfiguredError,
   generatePlanningDraft,
   generateRecipeDraft,
+  normalizeParsedDietPlan,
   parseDietPlanFromImage,
 } from '../lib/llm';
 import { getUserClient } from '../lib/supabase';
@@ -601,13 +602,10 @@ llmRouter.post('/llm/parse-diet-plan-image', async (c) => {
     return c.json({ error: 'llm_failed', message: (err as Error).message }, 502);
   }
 
-  // 3. Validation Zod du DietPlan extrait. Si ca ne valide pas, on echoue
-  // proprement plutot que de renvoyer une structure casse au client.
-  const dietPlanCandidate = {
-    slots: outcome.parsed.slots ?? {},
-    dailyRules: outcome.parsed.dailyRules ?? [],
-    note: outcome.parsed.note ?? null,
-  };
+  // 3. Normalisation post-LLM (mapping categories EN->FR + ids manquants
+  // + alternatives par defaut), puis validation Zod stricte. Si la
+  // validation echoue malgre la normalisation, on renvoie 422.
+  const dietPlanCandidate = normalizeParsedDietPlan(outcome.parsed);
   const validated = DietPlanSchema.safeParse(dietPlanCandidate);
   if (!validated.success) {
     console.warn('[llm/parse-diet-plan-image] invalid DietPlan from LLM', validated.error.issues);
