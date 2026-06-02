@@ -17,6 +17,7 @@
     "dev:api": "pnpm --filter @mealendar/api dev",
     "dev:mobile": "pnpm --filter @mealendar/mobile start",
     "build:android": "pnpm --filter @mealendar/mobile build:android:preview",
+    "build:android:dev": "pnpm --filter @mealendar/mobile build:android:dev",
     "build:android:prod": "pnpm --filter @mealendar/mobile build:android:production",
     "build:ios": "pnpm --filter @mealendar/mobile build:ios:altstore",
     "build:ios:preview": "pnpm --filter @mealendar/mobile build:ios:preview",
