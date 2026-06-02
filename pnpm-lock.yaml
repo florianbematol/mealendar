@@ -79,7 +79,7 @@ importers:
         specifier: ~18.0.13
         version: 18.0.13(expo@54.0.34)(react-native@0.81.5(@babel/core@7.29.0)(@react-native/metro-config@0.85.3(@babel/core@7.29.0))(@types/react@19.1.17)(react@19.1.0))
       expo-dev-client:
-        specifier: ^6.0.21
+        specifier: ~6.0.21
         version: 6.0.21(expo@54.0.34)
       expo-device:
         specifier: ~8.0.10
