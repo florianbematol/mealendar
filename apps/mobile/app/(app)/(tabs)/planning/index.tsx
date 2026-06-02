@@ -14,6 +14,7 @@ import { ApiError } from '@/lib/api';
 import {
   WEEKDAYS,
   WEEKDAY_LABELS,
+  addDays,
   addMonths,
   formatMonthYear,
   isSameMonth,
@@ -27,8 +28,9 @@ import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import { type MealPlanRange, findCoveredSlots } from '@mealendar/shared';
 import { router } from 'expo-router';
-import { useMemo, useRef, useState } from 'react';
-import { Alert, PanResponder, ScrollView, StyleSheet, View } from 'react-native';
+import { useMemo, useState } from 'react';
+import { Alert, Dimensions, ScrollView, StyleSheet, View } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
   ActivityIndicator,
   Button,
@@ -42,6 +44,13 @@ import {
   TouchableRipple,
   useTheme,
 } from 'react-native-paper';
+import Animated, {
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 type ViewMode = 'month' | 'week';
@@ -99,9 +108,6 @@ export default function PlanningIndexScreen() {
     };
   }, [viewMode, refDate]);
 
-  const meals = useMealsRange(householdId, window.from, window.to);
-  const setMeals = useSetMealsRange(householdId ?? '');
-  const generateLlm = useGeneratePlanningWithLlm(householdId ?? '');
   const ranges = useMealPlanRanges(householdId, window.from, window.to);
   const createRange = useCreateMealPlanRange();
 
@@ -180,33 +186,6 @@ export default function PlanningIndexScreen() {
   };
 
   // ---------------------------------------------------------------------------
-  // Set des dates considerees comme "planifiees" pour le calendrier.
-  // Inclut :
-  //  - les jours qui ont un meal direct (mealsList)
-  //  - les jours dont un slot est COUVERT par un meal precedent avec
-  //    coversMeals > 1 (sinon on indique a tort que le jour est vide).
-  // ---------------------------------------------------------------------------
-  const plannedDays = useMemo(() => {
-    const set = new Set<string>();
-    const mealsList = meals.data?.meals ?? [];
-    for (const m of mealsList) set.add(m.date);
-    if (mealPlan.data) {
-      for (const m of mealsList) {
-        const cm = m.coversMeals ?? 1;
-        if (cm <= 1) continue;
-        const covered = findCoveredSlots({
-          sourceDate: m.date,
-          sourceSlotKey: m.slotKey,
-          coversMeals: cm,
-          slotConfig: mealPlan.data.slotConfig,
-        });
-        for (const c of covered) set.add(c.date);
-      }
-    }
-    return set;
-  }, [meals.data, mealPlan.data]);
-
-  // ---------------------------------------------------------------------------
   // Setup state (reutilise la SetupSection existante)
   // ---------------------------------------------------------------------------
   const slotsPerWeek = mealPlan.data
@@ -241,36 +220,63 @@ export default function PlanningIndexScreen() {
   };
   const onToday = () => setRefDate(todayIso());
 
-  /**
-   * Swipe horizontal sur le calendrier pour changer de periode.
-   * Seuils :
-   *  - dx > 50px et |dx| > |dy| * 1.5 -> swipe horizontal valide
-   *  - sinon le geste est rendu aux enfants (long-press, tap)
-   *
-   * On utilise useRef pour eviter de recreer le responder a chaque render
-   * (le responder capture viewMode/setRefDate via closure mais on lit
-   * depuis la ref a chaque release).
-   */
-  const swipeRef = useRef({ onPrev, onNext });
-  swipeRef.current = { onPrev, onNext };
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        // Ne capture que si geste clairement horizontal et significatif
-        onMoveShouldSetPanResponder: (_, gs) =>
-          Math.abs(gs.dx) > 12 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.5,
-        onPanResponderRelease: (_, gs) => {
-          if (gs.dx > 50) {
-            swipeRef.current.onPrev();
-            haptics.light();
-          } else if (gs.dx < -50) {
-            swipeRef.current.onNext();
-            haptics.light();
-          }
-        },
-      }),
-    [],
-  );
+  // ---------------------------------------------------------------------------
+  // Animation slide horizontale (reanimated + gesture-handler)
+  //
+  // Carousel : on rend 3 mois cote a cote (-1, 0, +1) dans une Animated.View
+  // de largeur 3*screenW. Le wrapper a marginLeft = -screenW pour que la page
+  // courante (index 1) soit centree au repos.
+  //
+  // dragX vaut le delta du doigt pendant le drag. Au release :
+  //   - si |dx| > 25% de la largeur : on anime jusqu'au bord, on commit le
+  //     state, puis on remet dragX a 0 sans animation (le nouveau carousel
+  //     ses 3 mois sont a nouveau autour du nouveau "courant").
+  //   - sinon : spring back a 0.
+  // ---------------------------------------------------------------------------
+  const screenW = Dimensions.get('window').width;
+  const dragX = useSharedValue(0);
+  const isAnimating = useSharedValue(false);
+
+  const commitChange = (direction: 'prev' | 'next') => {
+    haptics.light();
+    if (direction === 'prev') onPrev();
+    else onNext();
+  };
+
+  const swipeGesture = Gesture.Pan()
+    .activeOffsetX([-12, 12])
+    .failOffsetY([-20, 20])
+    .onUpdate((ev) => {
+      'worklet';
+      if (isAnimating.value) return;
+      dragX.value = ev.translationX;
+    })
+    .onEnd((ev) => {
+      'worklet';
+      if (isAnimating.value) return;
+      const threshold = screenW * 0.25;
+      if (ev.translationX > threshold) {
+        isAnimating.value = true;
+        dragX.value = withTiming(screenW, { duration: 220 }, () => {
+          dragX.value = 0;
+          isAnimating.value = false;
+          runOnJS(commitChange)('prev');
+        });
+      } else if (ev.translationX < -threshold) {
+        isAnimating.value = true;
+        dragX.value = withTiming(-screenW, { duration: 220 }, () => {
+          dragX.value = 0;
+          isAnimating.value = false;
+          runOnJS(commitChange)('next');
+        });
+      } else {
+        dragX.value = withSpring(0, { damping: 20, stiffness: 200 });
+      }
+    });
+
+  const carouselAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: dragX.value }],
+  }));
 
   const headerLabel = useMemo(() => {
     if (viewMode === 'week') {
@@ -290,9 +296,7 @@ export default function PlanningIndexScreen() {
     >
       <Topbar />
 
-      <View
-        style={[styles.container, { paddingBottom: tabBarHeight + 16, backgroundColor: 'blue' }]}
-      >
+      <View style={[styles.container, { paddingBottom: tabBarHeight + 16 }]}>
         <View style={styles.titleRow}>
           <Text variant="titleLarge" style={styles.title}>
             Planning
@@ -366,36 +370,50 @@ export default function PlanningIndexScreen() {
           <IconButton icon="chevron-right" onPress={onNext} />
         </View>
 
-        {meals.isPending ? (
-          <View style={styles.loaderRow}>
-            <ActivityIndicator size="small" color={theme.colors.primary} />
-          </View>
-        ) : (
-          <View style={styles.swipeArea} {...panResponder.panHandlers}>
-            {viewMode === 'month' ? (
-              <MonthGrid
-                cells={window.cells}
-                refDate={refDate}
-                plannedDays={plannedDays}
-                ranges={ranges.data ?? []}
-                rangeStart={rangeStart}
-                rangeEnd={null}
-                onPressCell={onCellTap}
-                onLongPressCell={onCellLongPress}
-              />
-            ) : (
-              <WeekList
-                cells={window.cells}
-                plannedDays={plannedDays}
-                ranges={ranges.data ?? []}
-                rangeStart={rangeStart}
-                rangeEnd={null}
-                onPressCell={onCellTap}
-                onLongPressCell={onCellLongPress}
-              />
-            )}
-          </View>
-        )}
+        <GestureDetector gesture={swipeGesture}>
+          <Animated.View
+            style={[
+              styles.carousel,
+              carouselAnimatedStyle,
+              {
+                width: screenW * 3,
+                marginLeft: -screenW - 16, // -screenW pour centrer index 1, -16 pour annuler le padding du container
+                marginRight: -16,
+              },
+            ]}
+          >
+            <CalendarPage
+              refDate={shiftRefDate(refDate, viewMode, -1)}
+              viewMode={viewMode}
+              householdId={householdId}
+              mealPlan={mealPlan.data ?? null}
+              rangeStart={null}
+              onCellTap={onCellTap}
+              onCellLongPress={onCellLongPress}
+              width={screenW}
+            />
+            <CalendarPage
+              refDate={refDate}
+              viewMode={viewMode}
+              householdId={householdId}
+              mealPlan={mealPlan.data ?? null}
+              rangeStart={rangeStart}
+              onCellTap={onCellTap}
+              onCellLongPress={onCellLongPress}
+              width={screenW}
+            />
+            <CalendarPage
+              refDate={shiftRefDate(refDate, viewMode, 1)}
+              viewMode={viewMode}
+              householdId={householdId}
+              mealPlan={mealPlan.data ?? null}
+              rangeStart={null}
+              onCellTap={onCellTap}
+              onCellLongPress={onCellLongPress}
+              width={screenW}
+            />
+          </Animated.View>
+        </GestureDetector>
 
         {/* Aide visuelle quand l'utilisateur a fait long-press sans encore
             avoir tape la 2e cellule */}
@@ -509,6 +527,103 @@ function assignRangeLanes(
   }
   return out;
 }
+
+// ============================================================================
+// CalendarPage : une "page" du carousel (un mois ou une semaine).
+//
+// Charge ses propres meals + ranges sur la fenetre calculee depuis refDate.
+// Les 3 instances rendues dans le carousel ont des windows differentes,
+// React Query met tout en cache pour eviter les appels redondants.
+// ============================================================================
+function CalendarPage({
+  refDate,
+  viewMode,
+  householdId,
+  mealPlan,
+  rangeStart,
+  onCellTap,
+  onCellLongPress,
+  width,
+}: {
+  refDate: string;
+  viewMode: ViewMode;
+  householdId: string | null;
+  mealPlan: { slotConfig: SlotConfig } | null;
+  rangeStart: string | null;
+  onCellTap: (date: string) => void;
+  onCellLongPress: (date: string) => void;
+  width: number;
+}) {
+  const window = useMemo(() => {
+    if (viewMode === 'week') {
+      const dates = weekDates(refDate);
+      return {
+        from: dates[0] as string,
+        to: dates[dates.length - 1] as string,
+        cells: dates,
+      };
+    }
+    const cells = monthGrid(refDate);
+    return {
+      from: cells[0] as string,
+      to: cells[cells.length - 1] as string,
+      cells,
+    };
+  }, [viewMode, refDate]);
+
+  const meals = useMealsRange(householdId, window.from, window.to);
+  const ranges = useMealPlanRanges(householdId, window.from, window.to);
+
+  const plannedDays = useMemo(() => {
+    const set = new Set<string>();
+    const mealsList = meals.data?.meals ?? [];
+    for (const m of mealsList) set.add(m.date);
+    if (mealPlan) {
+      for (const m of mealsList) {
+        const cm = m.coversMeals ?? 1;
+        if (cm <= 1) continue;
+        const covered = findCoveredSlots({
+          sourceDate: m.date,
+          sourceSlotKey: m.slotKey,
+          coversMeals: cm,
+          slotConfig: mealPlan.slotConfig,
+        });
+        for (const c of covered) set.add(c.date);
+      }
+    }
+    return set;
+  }, [meals.data, mealPlan]);
+
+  return (
+    <View style={{ width, paddingHorizontal: 16 }}>
+      {viewMode === 'month' ? (
+        <MonthGrid
+          cells={window.cells}
+          refDate={refDate}
+          plannedDays={plannedDays}
+          ranges={ranges.data ?? []}
+          rangeStart={rangeStart}
+          rangeEnd={null}
+          onPressCell={onCellTap}
+          onLongPressCell={onCellLongPress}
+        />
+      ) : (
+        <WeekList
+          cells={window.cells}
+          plannedDays={plannedDays}
+          ranges={ranges.data ?? []}
+          rangeStart={rangeStart}
+          rangeEnd={null}
+          onPressCell={onCellTap}
+          onLongPressCell={onCellLongPress}
+        />
+      )}
+    </View>
+  );
+}
+
+// Type alias pour le slotConfig (utilise par CalendarPage)
+type SlotConfig = Record<string, { key: string; time?: string }[]>;
 
 // ============================================================================
 // MonthGrid : 7 colonnes (lun-dim) x 6 lignes
@@ -790,7 +905,7 @@ function WeekList({
     ranges.filter((r) => date >= r.dateFrom && date <= r.dateTo);
 
   return (
-    <View style={{ flex: 1, gap: 6, backgroundColor: 'red', height: '100%' }}>
+    <View style={{ flex: 1, gap: 6 }}>
       {cells.map((date) => {
         const isToday = date === today;
         const isPast = date < today;
@@ -914,6 +1029,16 @@ function formatDdMm(s: string): string {
   return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+/**
+ * Decale la refDate d'une "page" complete selon le mode :
+ *  - month : ±1 mois
+ *  - week  : ±7 jours
+ */
+function shiftRefDate(refDate: string, viewMode: ViewMode, direction: -1 | 1): string {
+  if (viewMode === 'week') return addDays(refDate, direction * 7);
+  return addMonths(refDate, direction);
+}
+
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   container: { flex: 1, paddingHorizontal: 16, paddingTop: 4, gap: 12 },
@@ -936,7 +1061,13 @@ const styles = StyleSheet.create({
   navLabel: { textAlign: 'center', fontWeight: '700' },
 
   loaderRow: { padding: 20, alignItems: 'center' },
-  swipeArea: { flex: 1, backgroundColor: 'yellow' },
+  swipeArea: { flex: 1 },
+  carousel: {
+    flex: 1,
+    flexDirection: 'row',
+    // marginLeft: -screenW est applique dynamiquement via style inline pour
+    // que la page centrale (index 1) soit centree sur l'ecran au repos.
+  },
 
   // Month grid : prend tout l'espace vertical disponible
   monthGrid: { flex: 1, gap: 1 },

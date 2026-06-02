@@ -13,6 +13,7 @@ import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef } from 'react';
 import { ActivityIndicator, View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { PaperProvider } from 'react-native-paper';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -72,14 +73,16 @@ function RootStack() {
 
 export default function RootLayout() {
   return (
-    <SafeAreaProvider>
-      <PaperProvider theme={lightTheme}>
-        <QueryClientProvider client={queryClient}>
-          <StatusBar style="dark" />
-          {isSupabaseConfigured ? <RootStack /> : <ConfigErrorScreen />}
-          <ToastHost />
-        </QueryClientProvider>
-      </PaperProvider>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <PaperProvider theme={lightTheme}>
+          <QueryClientProvider client={queryClient}>
+            <StatusBar style="dark" />
+            {isSupabaseConfigured ? <RootStack /> : <ConfigErrorScreen />}
+            <ToastHost />
+          </QueryClientProvider>
+        </PaperProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }

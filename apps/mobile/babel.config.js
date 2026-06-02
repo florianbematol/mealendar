@@ -9,5 +9,7 @@ module.exports = (api) => {
         },
       ],
     ],
+    // react-native-reanimated necessite ce plugin EN DERNIER (worklets compilation).
+    plugins: ['react-native-worklets/plugin'],
   };
 };
