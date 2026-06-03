@@ -28,7 +28,7 @@ import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import { type MealPlanRange, findCoveredSlots } from '@mealendar/shared';
 import { router } from 'expo-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Alert, Dimensions, ScrollView, StyleSheet, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
@@ -47,6 +47,7 @@ import {
 import Animated, {
   runOnJS,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withSpring,
   withTiming,
@@ -66,9 +67,48 @@ export default function PlanningIndexScreen() {
   const recipes = useRecipes(householdId);
 
   const [viewMode, setViewMode] = useState<ViewMode>('month');
-  /** Date de reference pour calculer la fenetre affichee. */
-  const [refDate, setRefDate] = useState<string>(todayIso());
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
+
+  // ---------------------------------------------------------------------------
+  // Carousel infini : on maintient une liste de "pages" (refDates) et un
+  // index courant. Quand l'utilisateur swipe, on incremente/decremente
+  // l'index. Quand l'index approche d'un bord, on etend la liste
+  // silencieusement (en ajoutant un mois en debut/fin et en re-ajustant
+  // l'index si necessaire).
+  //
+  // Le translateX du carousel est calcule en derive : -currentIndex*screenW
+  // + dragX (le delta du doigt pendant le drag). Au commit (apres animation
+  // de fin de swipe), on incremente currentIndex et on remet dragX a 0
+  // SIMULTANEMENT, ce qui rend le repositionnement invisible (pas de flicker).
+  // ---------------------------------------------------------------------------
+  const INITIAL_PAGE_COUNT = 7;
+  const INITIAL_CURRENT = Math.floor(INITIAL_PAGE_COUNT / 2);
+  const EXTEND_THRESHOLD = 1; // si on est a < EXTEND_THRESHOLD du bord, on etend la liste
+
+  const [pages, setPages] = useState<string[]>(() =>
+    Array.from({ length: INITIAL_PAGE_COUNT }, (_, i) =>
+      shiftRefDate(todayIso(), 'month', i - INITIAL_CURRENT),
+    ),
+  );
+  const [currentIndex, setCurrentIndex] = useState(INITIAL_CURRENT);
+
+  /** Date de reference pour calculer la fenetre affichee. */
+  const refDate = pages[currentIndex] ?? todayIso();
+
+  // Quand on bascule month <-> week, le step entre pages change (1 mois vs 7
+  // jours). On regenere la liste centree sur la refDate courante avec le
+  // nouveau step. Ne touche pas a refDate elle-meme.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: viewMode is the trigger
+  useEffect(() => {
+    setPages(
+      Array.from({ length: INITIAL_PAGE_COUNT }, (_, i) =>
+        shiftRefDate(refDate, viewMode, i - INITIAL_CURRENT),
+      ),
+    );
+    setCurrentIndex(INITIAL_CURRENT);
+    // dragX et translateX sont reset via le re-render naturel
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode]);
 
   // ---------------------------------------------------------------------------
   // Selection de plage : long-press sur une cellule pose rangeStart, le tap
@@ -208,39 +248,88 @@ export default function PlanningIndexScreen() {
   const dietRulesCount = myDietPlan.data?.dietPlan?.dailyRules?.length ?? 0;
 
   // ---------------------------------------------------------------------------
-  // Navigation periode prev/next
-  // ---------------------------------------------------------------------------
-  const onPrev = () => {
-    if (viewMode === 'week') setRefDate((d) => addDaysSafe(d, -7));
-    else setRefDate((d) => addMonths(d, -1));
-  };
-  const onNext = () => {
-    if (viewMode === 'week') setRefDate((d) => addDaysSafe(d, 7));
-    else setRefDate((d) => addMonths(d, 1));
-  };
-  const onToday = () => setRefDate(todayIso());
-
-  // ---------------------------------------------------------------------------
   // Animation slide horizontale (reanimated + gesture-handler)
   //
-  // Carousel : on rend 3 mois cote a cote (-1, 0, +1) dans une Animated.View
-  // de largeur 3*screenW. Le wrapper a marginLeft = -screenW pour que la page
-  // courante (index 1) soit centree au repos.
+  // Vrai carousel infini : pages[currentIndex] est centre, dragX est le delta
+  // du doigt pendant le drag. translateX = -currentIndex*screenW + dragX
+  // (calcule via useDerivedValue, donc toujours coherent).
   //
-  // dragX vaut le delta du doigt pendant le drag. Au release :
-  //   - si |dx| > 25% de la largeur : on anime jusqu'au bord, on commit le
-  //     state, puis on remet dragX a 0 sans animation (le nouveau carousel
-  //     ses 3 mois sont a nouveau autour du nouveau "courant").
-  //   - sinon : spring back a 0.
+  // Au commit (apres animation slide vers le bord), on incremente
+  // currentIndex (state JS) ET on remet dragX a 0 dans la meme tick. La
+  // formule donne le meme translateX final, donc aucun flicker visible.
+  //
+  // Quand currentIndex approche d'un bord (< EXTEND_THRESHOLD), on etend
+  // silencieusement la liste pages en ajoutant une page au debut/fin et en
+  // ajustant currentIndex pour compenser le shift.
   // ---------------------------------------------------------------------------
   const screenW = Dimensions.get('window').width;
   const dragX = useSharedValue(0);
   const isAnimating = useSharedValue(false);
 
+  // Etend la liste pages si on est trop pres d'un bord. Doit etre appele
+  // apres setCurrentIndex pour avoir l'index a jour.
+  const extendPagesIfNeeded = (idx: number, currentPages: string[], mode: ViewMode) => {
+    if (idx <= EXTEND_THRESHOLD) {
+      // Manque de pages a gauche : on prepend une page
+      const first = currentPages[0] ?? todayIso();
+      const newPage = shiftRefDate(first, mode, -1);
+      setPages([newPage, ...currentPages]);
+      // currentIndex doit etre incremente de 1 pour pointer sur la meme page
+      setCurrentIndex((i) => i + 1);
+      // dragX doit etre decale de -screenW pour compenser le shift visuel
+      dragX.value -= screenW;
+    } else if (idx >= currentPages.length - 1 - EXTEND_THRESHOLD) {
+      // Manque de pages a droite : append
+      const last = currentPages[currentPages.length - 1] ?? todayIso();
+      const newPage = shiftRefDate(last, mode, 1);
+      setPages([...currentPages, newPage]);
+      // currentIndex inchange (pointe toujours au meme endroit), pas de shift visuel
+    }
+  };
+
   const commitChange = (direction: 'prev' | 'next') => {
-    haptics.light();
-    if (direction === 'prev') onPrev();
-    else onNext();
+    setCurrentIndex((idx) => {
+      const newIdx = direction === 'prev' ? idx - 1 : idx + 1;
+      // Reset dragX a 0 EN MEME TEMPS que le commit React. La formule
+      // translateX = -newIdx*W + 0 = ce qu'on avait visuellement avec
+      // -oldIdx*W + (±W) avant le commit. Donc transition invisible.
+      dragX.value = 0;
+      isAnimating.value = false;
+      // On etend la liste apres le commit pour anticiper les prochains swipes
+      extendPagesIfNeeded(newIdx, pages, viewMode);
+      return newIdx;
+    });
+  };
+
+  // ---------------------------------------------------------------------------
+  // Navigation externe (chevrons et "Aujourd'hui") : on appelle commitChange
+  // avec une animation pour que le mouvement soit visible. Si la page cible
+  // est plus loin qu'un voisin, on saute directement (refDate change, le
+  // carousel se reinitialise).
+  // ---------------------------------------------------------------------------
+  const onPrev = () => {
+    if (isAnimating.value) return;
+    isAnimating.value = true;
+    dragX.value = withTiming(screenW, { duration: 220 }, () => {
+      runOnJS(commitChange)('prev');
+    });
+  };
+  const onNext = () => {
+    if (isAnimating.value) return;
+    isAnimating.value = true;
+    dragX.value = withTiming(-screenW, { duration: 220 }, () => {
+      runOnJS(commitChange)('next');
+    });
+  };
+  const onToday = () => {
+    // Saut direct vers today : on regen la liste autour de today
+    setPages(
+      Array.from({ length: INITIAL_PAGE_COUNT }, (_, i) =>
+        shiftRefDate(todayIso(), viewMode, i - INITIAL_CURRENT),
+      ),
+    );
+    setCurrentIndex(INITIAL_CURRENT);
+    dragX.value = 0;
   };
 
   const swipeGesture = Gesture.Pan()
@@ -258,15 +347,11 @@ export default function PlanningIndexScreen() {
       if (ev.translationX > threshold) {
         isAnimating.value = true;
         dragX.value = withTiming(screenW, { duration: 220 }, () => {
-          dragX.value = 0;
-          isAnimating.value = false;
           runOnJS(commitChange)('prev');
         });
       } else if (ev.translationX < -threshold) {
         isAnimating.value = true;
         dragX.value = withTiming(-screenW, { duration: 220 }, () => {
-          dragX.value = 0;
-          isAnimating.value = false;
           runOnJS(commitChange)('next');
         });
       } else {
@@ -274,8 +359,12 @@ export default function PlanningIndexScreen() {
       }
     });
 
+  // translateX permanent : -currentIndex*W + dragX. Recompute en worklet
+  // a chaque frame pour suivre dragX.
+  const translateX = useDerivedValue(() => -currentIndex * screenW + dragX.value);
+
   const carouselAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: dragX.value }],
+    transform: [{ translateX: translateX.value }],
   }));
 
   const headerLabel = useMemo(() => {
@@ -376,42 +465,30 @@ export default function PlanningIndexScreen() {
               styles.carousel,
               carouselAnimatedStyle,
               {
-                width: screenW * 3,
-                marginLeft: -screenW - 16, // -screenW pour centrer index 1, -16 pour annuler le padding du container
+                // Largeur totale = N pages * largeur ecran. Le translateX
+                // s'occupe du positionnement (negatif = la page courante
+                // est a l'ecran).
+                width: screenW * pages.length,
+                // -16 pour annuler le paddingHorizontal du container parent
+                // afin que les pages remplissent vraiment l'ecran.
+                marginLeft: -16,
                 marginRight: -16,
               },
             ]}
           >
-            <CalendarPage
-              refDate={shiftRefDate(refDate, viewMode, -1)}
-              viewMode={viewMode}
-              householdId={householdId}
-              mealPlan={mealPlan.data ?? null}
-              rangeStart={null}
-              onCellTap={onCellTap}
-              onCellLongPress={onCellLongPress}
-              width={screenW}
-            />
-            <CalendarPage
-              refDate={refDate}
-              viewMode={viewMode}
-              householdId={householdId}
-              mealPlan={mealPlan.data ?? null}
-              rangeStart={rangeStart}
-              onCellTap={onCellTap}
-              onCellLongPress={onCellLongPress}
-              width={screenW}
-            />
-            <CalendarPage
-              refDate={shiftRefDate(refDate, viewMode, 1)}
-              viewMode={viewMode}
-              householdId={householdId}
-              mealPlan={mealPlan.data ?? null}
-              rangeStart={null}
-              onCellTap={onCellTap}
-              onCellLongPress={onCellLongPress}
-              width={screenW}
-            />
+            {pages.map((pageDate, idx) => (
+              <CalendarPage
+                key={pageDate}
+                refDate={pageDate}
+                viewMode={viewMode}
+                householdId={householdId}
+                mealPlan={mealPlan.data ?? null}
+                rangeStart={idx === currentIndex ? rangeStart : null}
+                onCellTap={onCellTap}
+                onCellLongPress={onCellLongPress}
+                width={screenW}
+              />
+            ))}
           </Animated.View>
         </GestureDetector>
 
@@ -1034,9 +1111,9 @@ function formatDdMm(s: string): string {
  *  - month : ±1 mois
  *  - week  : ±7 jours
  */
-function shiftRefDate(refDate: string, viewMode: ViewMode, direction: -1 | 1): string {
-  if (viewMode === 'week') return addDays(refDate, direction * 7);
-  return addMonths(refDate, direction);
+function shiftRefDate(refDate: string, viewMode: ViewMode, offset: number): string {
+  if (viewMode === 'week') return addDays(refDate, offset * 7);
+  return addMonths(refDate, offset);
 }
 
 const styles = StyleSheet.create({
