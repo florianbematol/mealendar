@@ -66,7 +66,7 @@ jobs:
 
       - name: Setup EAS
         # Doc : https://github.com/expo/expo-github-action
-        uses: expo/expo-github-action@v8
+        uses: expo/expo-github-action@v9
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
