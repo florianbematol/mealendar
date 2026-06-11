@@ -1,15 +1,9 @@
 import { SetupChip } from '@/components/SetupChip';
 import { Topbar } from '@/components/Topbar';
 import { useMyDietPlan } from '@/hooks/useDietPlans';
-import {
-  useCreateMealPlanRange,
-  useMealPlan,
-  useMealPlanRanges,
-  useMealsRange,
-} from '@/hooks/usePlannings';
-import { addMonths, monthGrid, todayIso } from '@/lib/dates';
+import { useCreateMealPlanRange, useMealPlan, useMealPlanRanges } from '@/hooks/usePlannings';
 import { useActiveHousehold } from '@/stores/activeHousehold';
-import { type MealPlanRange, findCoveredSlots } from '@mealendar/shared';
+import type { MealPlanRange } from '@mealendar/shared';
 import dayjs from 'dayjs';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
@@ -58,23 +52,24 @@ LocaleConfig.locales.fr = {
 LocaleConfig.defaultLocale = 'fr';
 
 /**
- * Page Planning : calendrier mois base sur react-native-calendars.
+ * Page Planning : calendrier scroll vertical (CalendarList).
  *
- * Marking :
- *  - markingType "period" : les plages existantes apparaissent comme des
- *    barres continues colorees (sans label).
- *  - dot : les jours planifies (au moins un repas) ont un point.
- *  - la selection de range en cours est aussi affichee en period (couleur
- *    differente).
+ * Le calendrier n'affiche QUE les plages de menus (meal_plan_ranges) sous
+ * forme de barres de periode continues. Les repas individuels (planned_meals)
+ * ne sont PAS affiches ici : le detail des repas se consulte en ouvrant un
+ * jour ou une plage.
+ *
+ * On charge TOUTES les plages du foyer (peu nombreuses, legeres) en une
+ * requete, sans filtre de date -> le scroll est instantane, les barres
+ * toujours presentes.
  *
  * Interactions :
- *  - 1er tap : pose le debut du range. 2e tap : si meme jour -> ouvre la
- *    vue jour (ou la vue range si jour dans une plage existante) ; sinon
- *    -> modale de naming -> creation plage + vue range.
+ *  - 1er tap : pose le debut de la selection.
+ *  - 2e tap sur un autre jour : modale de naming -> creation plage + vue range.
+ *  - 2e tap sur le meme jour : ouvre la vue jour (ou la vue range si le jour
+ *    appartient deja a une plage existante).
  *
- * NOTE UI : le style est laisse au theme par defaut de react-native-calendars.
- * La customization (couleurs, police, hauteur des cellules) se fera via la
- * prop `theme` du <Calendar> et les `selectedColor`/`color` des markedDates.
+ * NOTE UI : style laisse au theme par defaut de react-native-calendars.
  */
 export default function PlanningIndexScreen() {
   const theme = useTheme();
@@ -85,47 +80,9 @@ export default function PlanningIndexScreen() {
   const mealPlan = useMealPlan(householdId);
   const myDietPlan = useMyDietPlan(householdId);
 
-  // Mois visible (string YYYY-MM-DD du 1er jour). On fetch [mois-1, mois+1].
-  const [visibleMonth, setVisibleMonth] = useState<string>(() => todayIso());
-
-  const fetchWindow = useMemo(() => {
-    // Fenetre large autour du mois visible : le scroll vertical affiche
-    // plusieurs mois a la fois, on couvre [-2, +2] pour avoir les markings
-    // prets sans refetch a chaque petit scroll.
-    const prevCells = monthGrid(addMonths(visibleMonth, -2));
-    const nextCells = monthGrid(addMonths(visibleMonth, 2));
-    return {
-      from: prevCells[0] as string,
-      to: nextCells[nextCells.length - 1] as string,
-    };
-  }, [visibleMonth]);
-
-  const meals = useMealsRange(householdId, fetchWindow.from, fetchWindow.to);
-  const ranges = useMealPlanRanges(householdId, fetchWindow.from, fetchWindow.to);
+  // Toutes les plages du foyer (sans filtre date).
+  const ranges = useMealPlanRanges(householdId);
   const createRange = useCreateMealPlanRange();
-
-  // ---------------------------------------------------------------------------
-  // Jours planifies (repas direct + couverts par coversMeals)
-  // ---------------------------------------------------------------------------
-  const plannedDays = useMemo(() => {
-    const set = new Set<string>();
-    const mealsList = meals.data?.meals ?? [];
-    for (const m of mealsList) set.add(m.date);
-    if (mealPlan.data) {
-      for (const m of mealsList) {
-        const cm = m.coversMeals ?? 1;
-        if (cm <= 1) continue;
-        const covered = findCoveredSlots({
-          sourceDate: m.date,
-          sourceSlotKey: m.slotKey,
-          coversMeals: cm,
-          slotConfig: mealPlan.data.slotConfig,
-        });
-        for (const c of covered) set.add(c.date);
-      }
-    }
-    return set;
-  }, [meals.data, mealPlan.data]);
 
   /** Map date -> plage existante (pour ouvrir la bonne vue au tap). */
   const rangeForDate = useMemo(() => {
@@ -153,12 +110,10 @@ export default function PlanningIndexScreen() {
     const date = day.dateString; // YYYY-MM-DD
 
     if (!rangeStart) {
-      // 1er tap : on pose le debut de la selection.
       setRangeStart(date);
       return;
     }
 
-    // 2e tap
     if (date === rangeStart) {
       // Tap 2x le meme jour : ouvre la vue jour (ou la plage existante).
       setRangeStart(null);
@@ -171,7 +126,6 @@ export default function PlanningIndexScreen() {
       return;
     }
 
-    // Range complet : on ordonne et on propose de creer une plage.
     const from = date < rangeStart ? date : rangeStart;
     const to = date < rangeStart ? rangeStart : date;
     setRangeStart(null);
@@ -199,56 +153,37 @@ export default function PlanningIndexScreen() {
   };
 
   // ---------------------------------------------------------------------------
-  // Construction des markedDates pour react-native-calendars
-  //
-  // markingType="period" : pour chaque plage existante, on marque
-  // startingDay / endingDay / jours du milieu avec une couleur. Les jours
-  // planifies recoivent un dot (marked + dotColor). La selection en cours
-  // (rangeStart) recoit un selected.
+  // markedDates : uniquement les plages (period) + la selection en cours.
   // ---------------------------------------------------------------------------
   const markedDates = useMemo<MarkedDates>(() => {
     const marks: MarkedDates = {};
 
-    // 1. Plages existantes -> period
     for (const r of ranges.data ?? []) {
       let cur = r.dateFrom;
       while (cur <= r.dateTo) {
-        const isStart = cur === r.dateFrom;
-        const isEnd = cur === r.dateTo;
         marks[cur] = {
           ...marks[cur],
-          // NOTE UI : couleur de la barre de periode (theme.colors.tertiaryContainer)
+          // NOTE UI : couleur de la barre de periode
           color: theme.colors.tertiaryContainer,
           textColor: theme.colors.onTertiaryContainer,
-          startingDay: isStart,
-          endingDay: isEnd,
+          startingDay: cur === r.dateFrom,
+          endingDay: cur === r.dateTo,
         };
         cur = dayjs(cur).add(1, 'day').format('YYYY-MM-DD');
       }
     }
 
-    // 2. Jours planifies -> dot
-    for (const d of plannedDays) {
-      marks[d] = {
-        ...marks[d],
-        marked: true,
-        // NOTE UI : couleur du dot (theme.colors.primary)
-        dotColor: theme.colors.primary,
-      };
-    }
-
-    // 3. Selection en cours -> selected
     if (rangeStart) {
       marks[rangeStart] = {
         ...marks[rangeStart],
         selected: true,
-        // NOTE UI : couleur de la cellule selectionnee
+        // NOTE UI : couleur de la cellule selectionnee (1er tap)
         selectedColor: theme.colors.primary,
       };
     }
 
     return marks;
-  }, [ranges.data, plannedDays, rangeStart, theme.colors]);
+  }, [ranges.data, rangeStart, theme.colors]);
 
   // ---------------------------------------------------------------------------
   // Setup chip
@@ -298,29 +233,19 @@ export default function PlanningIndexScreen() {
         </View>
 
         <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant, marginBottom: 4 }}>
-          Tapez 2 fois un jour pour le planifier, ou selectionnez une plage de dates.
+          Selectionnez une plage de dates pour planifier vos repas.
         </Text>
 
-        {/* NOTE UI : le style global se customise via la prop `theme`.
-            CalendarList = scroll vertical infini (plusieurs mois empiles). */}
+        {/* NOTE UI : style global via la prop `theme`. CalendarList = scroll
+            vertical infini. Affiche uniquement les plages (period marking). */}
         <CalendarList
           markingType="period"
           markedDates={markedDates}
           onDayPress={onDayPress}
           firstDay={1}
-          // Scroll vertical (defaut). Nombre de mois rendus avant/apres le
-          // mois courant ; au-dela le scroll s'arrete (semi-infini).
           pastScrollRange={24}
           futureScrollRange={24}
           showScrollIndicator={false}
-          // Quand les mois visibles changent, on recentre la fenetre de fetch
-          // sur le 1er mois visible.
-          onVisibleMonthsChange={(months: DateData[]) => {
-            const first = months[0];
-            if (first) {
-              setVisibleMonth(dayjs(first.dateString).date(1).format('YYYY-MM-DD'));
-            }
-          }}
         />
       </View>
 
