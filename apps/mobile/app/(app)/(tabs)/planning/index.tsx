@@ -14,7 +14,7 @@ import dayjs from 'dayjs';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
-import { Calendar, type DateData, LocaleConfig } from 'react-native-calendars';
+import { CalendarList, type DateData, LocaleConfig } from 'react-native-calendars';
 import type { MarkedDates } from 'react-native-calendars/src/types';
 import { Button, Dialog, Portal, Text, TextInput, useTheme } from 'react-native-paper';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -89,8 +89,11 @@ export default function PlanningIndexScreen() {
   const [visibleMonth, setVisibleMonth] = useState<string>(() => todayIso());
 
   const fetchWindow = useMemo(() => {
-    const prevCells = monthGrid(addMonths(visibleMonth, -1));
-    const nextCells = monthGrid(addMonths(visibleMonth, 1));
+    // Fenetre large autour du mois visible : le scroll vertical affiche
+    // plusieurs mois a la fois, on couvre [-2, +2] pour avoir les markings
+    // prets sans refetch a chaque petit scroll.
+    const prevCells = monthGrid(addMonths(visibleMonth, -2));
+    const nextCells = monthGrid(addMonths(visibleMonth, 2));
     return {
       from: prevCells[0] as string,
       to: nextCells[nextCells.length - 1] as string,
@@ -298,17 +301,25 @@ export default function PlanningIndexScreen() {
           Tapez 2 fois un jour pour le planifier, ou selectionnez une plage de dates.
         </Text>
 
-        {/* NOTE UI : le style global du calendrier se customise via la prop
-            `theme` (couleurs du header, des jours, etc.). Laisse par defaut
-            pour l'instant. */}
-        <Calendar
+        {/* NOTE UI : le style global se customise via la prop `theme`.
+            CalendarList = scroll vertical infini (plusieurs mois empiles). */}
+        <CalendarList
           markingType="period"
           markedDates={markedDates}
           onDayPress={onDayPress}
           firstDay={1}
-          enableSwipeMonths
-          onMonthChange={(m: DateData) => {
-            setVisibleMonth(dayjs(m.dateString).date(1).format('YYYY-MM-DD'));
+          // Scroll vertical (defaut). Nombre de mois rendus avant/apres le
+          // mois courant ; au-dela le scroll s'arrete (semi-infini).
+          pastScrollRange={24}
+          futureScrollRange={24}
+          showScrollIndicator={false}
+          // Quand les mois visibles changent, on recentre la fenetre de fetch
+          // sur le 1er mois visible.
+          onVisibleMonthsChange={(months: DateData[]) => {
+            const first = months[0];
+            if (first) {
+              setVisibleMonth(dayjs(first.dateString).date(1).format('YYYY-MM-DD'));
+            }
           }}
         />
       </View>
