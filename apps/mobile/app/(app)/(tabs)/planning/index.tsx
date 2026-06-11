@@ -26,9 +26,9 @@ import {
 import { haptics } from '@/lib/haptics';
 import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
-import { type MealPlanRange, findCoveredSlots } from '@mealendar/shared';
+import { type MealPlanRange, type PlannedMeal, findCoveredSlots } from '@mealendar/shared';
 import { router } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Dimensions, ScrollView, StyleSheet, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
@@ -56,6 +56,13 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 type ViewMode = 'month' | 'week';
 
+// Carousel : 11 pages mountees au demarrage (5 avant + courant + 5 apres).
+// On etend la liste quand on s'approche d'un bord ; ce buffer reduit les
+// remounts. La virtualisation (rendu seulement de +/-1 page) limite le cout.
+const INITIAL_PAGE_COUNT = 11;
+const INITIAL_CURRENT = Math.floor(INITIAL_PAGE_COUNT / 2);
+const EXTEND_THRESHOLD = 2; // anticipe l'extension 2 pages avant le bord
+
 export default function PlanningIndexScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
@@ -81,9 +88,6 @@ export default function PlanningIndexScreen() {
   // de fin de swipe), on incremente currentIndex et on remet dragX a 0
   // SIMULTANEMENT, ce qui rend le repositionnement invisible (pas de flicker).
   // ---------------------------------------------------------------------------
-  const INITIAL_PAGE_COUNT = 7;
-  const INITIAL_CURRENT = Math.floor(INITIAL_PAGE_COUNT / 2);
-  const EXTEND_THRESHOLD = 1; // si on est a < EXTEND_THRESHOLD du bord, on etend la liste
 
   const [pages, setPages] = useState<string[]>(() =>
     Array.from({ length: INITIAL_PAGE_COUNT }, (_, i) =>
@@ -128,74 +132,72 @@ export default function PlanningIndexScreen() {
   const clearRange = () => setRangeStart(null);
 
   // ---------------------------------------------------------------------------
-  // Calcul de la fenetre [from, to] selon viewMode + refDate
+  // Fenetre globale du carousel : couvre toutes les pages mountees, du
+  // premier jour de la 1ere page au dernier de la derniere. On fetch
+  // meals + ranges UNE SEULE FOIS pour toute cette fenetre, puis on filtre
+  // dans chaque CalendarPage. Evite N requetes parallèles, et garantit
+  // que les pages voisines ont deja les donnees quand on swipe vers elles.
   // ---------------------------------------------------------------------------
-  const window = useMemo(() => {
+  const globalWindow = useMemo(() => {
+    if (pages.length === 0) {
+      return { from: refDate, to: refDate };
+    }
+    const firstPage = pages[0] as string;
+    const lastPage = pages[pages.length - 1] as string;
     if (viewMode === 'week') {
-      const dates = weekDates(refDate);
+      const firstDates = weekDates(firstPage);
+      const lastDates = weekDates(lastPage);
       return {
-        from: dates[0] as string,
-        to: dates[dates.length - 1] as string,
-        cells: dates,
+        from: firstDates[0] as string,
+        to: lastDates[lastDates.length - 1] as string,
       };
     }
-    // month : grille de 6 semaines (42 cases) lundi-aligne
-    const cells = monthGrid(refDate);
+    const firstCells = monthGrid(firstPage);
+    const lastCells = monthGrid(lastPage);
     return {
-      from: cells[0] as string,
-      to: cells[cells.length - 1] as string,
-      cells,
+      from: firstCells[0] as string,
+      to: lastCells[lastCells.length - 1] as string,
     };
-  }, [viewMode, refDate]);
+  }, [pages, viewMode, refDate]);
 
-  const ranges = useMealPlanRanges(householdId, window.from, window.to);
+  const meals = useMealsRange(householdId, globalWindow.from, globalWindow.to);
+  const ranges = useMealPlanRanges(householdId, globalWindow.from, globalWindow.to);
   const createRange = useCreateMealPlanRange();
-
-  /**
-   * Helper : pour une date donnee, retourne la plage qui la contient (la
-   * premiere plage qui matche si plusieurs se chevauchent), ou null.
-   */
-  const getRangeForDate = (date: string) => {
-    for (const r of ranges.data ?? []) {
-      if (date >= r.dateFrom && date <= r.dateTo) return r;
-    }
-    return null;
-  };
 
   // ---------------------------------------------------------------------------
   // Handlers de cellule
+  //
+  // Stabilises avec useCallback + une ref pour les valeurs mutables
+  // (rangeStart, ranges) afin de ne JAMAIS recreer les callbacks. Ca permet
+  // a React.memo(CalendarPage/MonthGrid) de fonctionner et d'eviter les
+  // re-rendus inutiles de toutes les grilles a chaque changement de state.
   // ---------------------------------------------------------------------------
-  const onCellLongPress = (date: string) => {
+  const handlersStateRef = useRef({ rangeStart, rangesData: ranges.data, householdId });
+  handlersStateRef.current = { rangeStart, rangesData: ranges.data, householdId };
+
+  const onCellLongPress = useCallback((date: string) => {
     haptics.medium();
     setRangeStart(date);
-  };
+  }, []);
 
-  /**
-   * Tap sur cellule :
-   *  - si on est en mode range (rangeStart pose) : on cree une plage persistee
-   *    [min(start, date), max(start, date)] et on navigue vers la vue range.
-   *  - si la date appartient deja a une plage existante : on ouvre la vue
-   *    range de cette plage.
-   *  - sinon : on ouvre la vue jour.
-   */
-  const onCellTap = async (date: string) => {
-    if (rangeStart) {
-      const a = rangeStart <= date ? rangeStart : date;
-      const b = rangeStart <= date ? date : rangeStart;
+  const onCellTap = useCallback((date: string) => {
+    const { rangeStart: rs, rangesData } = handlersStateRef.current;
+    if (rs) {
+      const a = rs <= date ? rs : date;
+      const b = rs <= date ? date : rs;
       setRangeStart(null);
       haptics.light();
-      // Ouvre la modale de nom plutot que de creer immediatement
       setPendingRange({ from: a, to: b });
       setPendingName(`Plage du ${formatDdMm(a)}`);
       return;
     }
-    const existing = getRangeForDate(date);
+    const existing = (rangesData ?? []).find((r) => date >= r.dateFrom && date <= r.dateTo);
     if (existing) {
       router.push(`/(app)/(tabs)/planning/range/${existing.dateFrom}/${existing.dateTo}`);
       return;
     }
     router.push(`/(app)/(tabs)/planning/day/${date}`);
-  };
+  }, []);
 
   /**
    * Validation de la modale de nom : cree la plage en DB puis navigue vers
@@ -264,41 +266,56 @@ export default function PlanningIndexScreen() {
   // ---------------------------------------------------------------------------
   const screenW = Dimensions.get('window').width;
   const dragX = useSharedValue(0);
+  /**
+   * Mirror du currentIndex en SharedValue pour pouvoir le lire dans un
+   * worklet (useDerivedValue) sans warning "Reading from value during render".
+   * On le synchronise via un useEffect a chaque changement de state JS.
+   */
+  const currentIndexSV = useSharedValue(INITIAL_CURRENT);
   const isAnimating = useSharedValue(false);
 
-  // Etend la liste pages si on est trop pres d'un bord. Doit etre appele
-  // apres setCurrentIndex pour avoir l'index a jour.
-  const extendPagesIfNeeded = (idx: number, currentPages: string[], mode: ViewMode) => {
-    if (idx <= EXTEND_THRESHOLD) {
+  // Synchronise currentIndexSV avec le state JS apres chaque commit React.
+  useEffect(() => {
+    currentIndexSV.value = currentIndex;
+  }, [currentIndex, currentIndexSV]);
+
+  // Etend la liste pages si on est trop pres d'un bord. Reagit au
+  // changement de currentIndex (apres un swipe). Ecriture des SharedValues
+  // dans le useEffect (post-render), pas dans le commit React.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: pages/viewMode lus mais pas dans les deps pour eviter une boucle
+  useEffect(() => {
+    if (currentIndex <= EXTEND_THRESHOLD) {
       // Manque de pages a gauche : on prepend une page
-      const first = currentPages[0] ?? todayIso();
-      const newPage = shiftRefDate(first, mode, -1);
-      setPages([newPage, ...currentPages]);
-      // currentIndex doit etre incremente de 1 pour pointer sur la meme page
-      setCurrentIndex((i) => i + 1);
-      // dragX doit etre decale de -screenW pour compenser le shift visuel
-      dragX.value -= screenW;
-    } else if (idx >= currentPages.length - 1 - EXTEND_THRESHOLD) {
-      // Manque de pages a droite : append
-      const last = currentPages[currentPages.length - 1] ?? todayIso();
-      const newPage = shiftRefDate(last, mode, 1);
-      setPages([...currentPages, newPage]);
-      // currentIndex inchange (pointe toujours au meme endroit), pas de shift visuel
+      const first = pages[0] ?? todayIso();
+      const newPage = shiftRefDate(first, viewMode, -1);
+      setPages([newPage, ...pages]);
+      // currentIndex doit etre incremente de 1 pour pointer sur la meme page.
+      // dragX += screenW pour que translateX = -(idx+1)*W + (dragX+W) reste
+      // identique a -idx*W + dragX (aucun mouvement visible).
+      const newIdx = currentIndex + 1;
+      currentIndexSV.value = newIdx;
+      dragX.value += screenW;
+      setCurrentIndex(newIdx);
+    } else if (currentIndex >= pages.length - 1 - EXTEND_THRESHOLD) {
+      // Manque de pages a droite : append. currentIndex inchange.
+      const last = pages[pages.length - 1] ?? todayIso();
+      const newPage = shiftRefDate(last, viewMode, 1);
+      setPages([...pages, newPage]);
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex]);
 
   const commitChange = (direction: 'prev' | 'next') => {
-    setCurrentIndex((idx) => {
-      const newIdx = direction === 'prev' ? idx - 1 : idx + 1;
-      // Reset dragX a 0 EN MEME TEMPS que le commit React. La formule
-      // translateX = -newIdx*W + 0 = ce qu'on avait visuellement avec
-      // -oldIdx*W + (±W) avant le commit. Donc transition invisible.
-      dragX.value = 0;
-      isAnimating.value = false;
-      // On etend la liste apres le commit pour anticiper les prochains swipes
-      extendPagesIfNeeded(newIdx, pages, viewMode);
-      return newIdx;
-    });
+    const newIdx = direction === 'prev' ? currentIndex - 1 : currentIndex + 1;
+    // Met a jour le SharedValue ET le dragX SIMULTANEMENT pour que la
+    // formule translateX = -newIdx*W + 0 donne le meme resultat visuel
+    // que -oldIdx*W + (±W) avant le commit. Aucun mouvement visible.
+    currentIndexSV.value = newIdx;
+    dragX.value = 0;
+    isAnimating.value = false;
+    setCurrentIndex(newIdx);
+    // Note : extendPagesIfNeeded est appele via useEffect quand currentIndex
+    // change, pour eviter les writes de SharedValue pendant le render.
   };
 
   // ---------------------------------------------------------------------------
@@ -321,7 +338,7 @@ export default function PlanningIndexScreen() {
       runOnJS(commitChange)('next');
     });
   };
-  const onToday = () => {
+  const onToday = useCallback(() => {
     // Saut direct vers today : on regen la liste autour de today
     setPages(
       Array.from({ length: INITIAL_PAGE_COUNT }, (_, i) =>
@@ -329,8 +346,9 @@ export default function PlanningIndexScreen() {
       ),
     );
     setCurrentIndex(INITIAL_CURRENT);
+    currentIndexSV.value = INITIAL_CURRENT;
     dragX.value = 0;
-  };
+  }, [viewMode, currentIndexSV, dragX]);
 
   const swipeGesture = Gesture.Pan()
     .activeOffsetX([-12, 12])
@@ -360,20 +378,14 @@ export default function PlanningIndexScreen() {
     });
 
   // translateX permanent : -currentIndex*W + dragX. Recompute en worklet
-  // a chaque frame pour suivre dragX.
-  const translateX = useDerivedValue(() => -currentIndex * screenW + dragX.value);
+  // a chaque frame pour suivre dragX. On lit currentIndexSV (SharedValue)
+  // au lieu du state JS pour eviter le warning Reanimated et garantir la
+  // synchro thread UI.
+  const translateX = useDerivedValue(() => -currentIndexSV.value * screenW + dragX.value);
 
   const carouselAnimatedStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }],
   }));
-
-  const headerLabel = useMemo(() => {
-    if (viewMode === 'week') {
-      const start = startOfWeek(refDate);
-      return formatRangeLabel(start, addDaysSafe(start, 6));
-    }
-    return formatMonthYear(refDate);
-  }, [viewMode, refDate]);
 
   // ---------------------------------------------------------------------------
   // Render
@@ -449,16 +461,6 @@ export default function PlanningIndexScreen() {
           </View>
         </View>
 
-        <View style={styles.navRow}>
-          <IconButton icon="chevron-left" onPress={onPrev} />
-          <TouchableRipple onPress={onToday} style={{ flex: 1 }} borderless>
-            <Text variant="titleMedium" style={styles.navLabel}>
-              {headerLabel}
-            </Text>
-          </TouchableRipple>
-          <IconButton icon="chevron-right" onPress={onNext} />
-        </View>
-
         <GestureDetector gesture={swipeGesture}>
           <Animated.View
             style={[
@@ -476,19 +478,31 @@ export default function PlanningIndexScreen() {
               },
             ]}
           >
-            {pages.map((pageDate, idx) => (
-              <CalendarPage
-                key={pageDate}
-                refDate={pageDate}
-                viewMode={viewMode}
-                householdId={householdId}
-                mealPlan={mealPlan.data ?? null}
-                rangeStart={idx === currentIndex ? rangeStart : null}
-                onCellTap={onCellTap}
-                onCellLongPress={onCellLongPress}
-                width={screenW}
-              />
-            ))}
+            {pages.map((pageDate, idx) => {
+              // Virtualisation : on ne rend la grille complete que pour les
+              // pages proches du currentIndex (courante + 1 de chaque cote).
+              // Les autres sont des placeholders vides de meme largeur, ce
+              // qui evite de monter 11*42 cellules d'un coup.
+              const isVisible = Math.abs(idx - currentIndex) <= 1;
+              if (!isVisible) {
+                return <View key={pageDate} style={{ width: screenW }} />;
+              }
+              return (
+                <CalendarPage
+                  key={pageDate}
+                  refDate={pageDate}
+                  viewMode={viewMode}
+                  mealPlan={mealPlan.data ?? null}
+                  rangeStart={idx === currentIndex ? rangeStart : null}
+                  allMeals={meals.data?.meals ?? []}
+                  allRanges={ranges.data ?? []}
+                  onCellTap={onCellTap}
+                  onCellLongPress={onCellLongPress}
+                  onTodayPress={onToday}
+                  width={screenW}
+                />
+              );
+            })}
           </Animated.View>
         </GestureDetector>
 
@@ -612,23 +626,29 @@ function assignRangeLanes(
 // Les 3 instances rendues dans le carousel ont des windows differentes,
 // React Query met tout en cache pour eviter les appels redondants.
 // ============================================================================
-function CalendarPage({
+const CalendarPage = memo(function CalendarPage({
   refDate,
   viewMode,
-  householdId,
   mealPlan,
   rangeStart,
+  allMeals,
+  allRanges,
   onCellTap,
   onCellLongPress,
+  onTodayPress,
   width,
 }: {
   refDate: string;
   viewMode: ViewMode;
-  householdId: string | null;
   mealPlan: { slotConfig: SlotConfig } | null;
   rangeStart: string | null;
+  /** Meals globaux (toute la fenetre du carousel). On filtre cote page. */
+  allMeals: PlannedMeal[];
+  /** Plages globales. On filtre cote page. */
+  allRanges: MealPlanRange[];
   onCellTap: (date: string) => void;
   onCellLongPress: (date: string) => void;
+  onTodayPress: () => void;
   width: number;
 }) {
   const window = useMemo(() => {
@@ -648,15 +668,22 @@ function CalendarPage({
     };
   }, [viewMode, refDate]);
 
-  const meals = useMealsRange(householdId, window.from, window.to);
-  const ranges = useMealPlanRanges(householdId, window.from, window.to);
+  // Filtre les meals/ranges sur la fenetre de la page (sous-ensemble des
+  // donnees globales chargees au parent).
+  const pageMeals = useMemo(
+    () => allMeals.filter((m) => m.date >= window.from && m.date <= window.to),
+    [allMeals, window.from, window.to],
+  );
+  const pageRanges = useMemo(
+    () => allRanges.filter((r) => !(r.dateTo < window.from || r.dateFrom > window.to)),
+    [allRanges, window.from, window.to],
+  );
 
   const plannedDays = useMemo(() => {
     const set = new Set<string>();
-    const mealsList = meals.data?.meals ?? [];
-    for (const m of mealsList) set.add(m.date);
+    for (const m of pageMeals) set.add(m.date);
     if (mealPlan) {
-      for (const m of mealsList) {
+      for (const m of pageMeals) {
         const cm = m.coversMeals ?? 1;
         if (cm <= 1) continue;
         const covered = findCoveredSlots({
@@ -669,16 +696,30 @@ function CalendarPage({
       }
     }
     return set;
-  }, [meals.data, mealPlan]);
+  }, [pageMeals, mealPlan]);
+
+  const headerLabel =
+    viewMode === 'week'
+      ? `${formatDdMm(window.from)} → ${formatDdMm(window.to)}`
+      : formatMonthYear(refDate);
 
   return (
-    <View style={{ width, paddingHorizontal: 16 }}>
+    <View style={{ width, paddingHorizontal: 16, height: '100%' }}>
+      <TouchableRipple
+        onPress={onTodayPress}
+        borderless
+        style={{ alignSelf: 'center', paddingHorizontal: 16, paddingVertical: 6, marginBottom: 4 }}
+      >
+        <Text variant="titleMedium" style={{ fontWeight: '700' }}>
+          {headerLabel}
+        </Text>
+      </TouchableRipple>
       {viewMode === 'month' ? (
         <MonthGrid
           cells={window.cells}
           refDate={refDate}
           plannedDays={plannedDays}
-          ranges={ranges.data ?? []}
+          ranges={pageRanges}
           rangeStart={rangeStart}
           rangeEnd={null}
           onPressCell={onCellTap}
@@ -688,7 +729,7 @@ function CalendarPage({
         <WeekList
           cells={window.cells}
           plannedDays={plannedDays}
-          ranges={ranges.data ?? []}
+          ranges={pageRanges}
           rangeStart={rangeStart}
           rangeEnd={null}
           onPressCell={onCellTap}
@@ -697,7 +738,7 @@ function CalendarPage({
       )}
     </View>
   );
-}
+});
 
 // Type alias pour le slotConfig (utilise par CalendarPage)
 type SlotConfig = Record<string, { key: string; time?: string }[]>;
@@ -705,7 +746,7 @@ type SlotConfig = Record<string, { key: string; time?: string }[]>;
 // ============================================================================
 // MonthGrid : 7 colonnes (lun-dim) x 6 lignes
 // ============================================================================
-function MonthGrid({
+const MonthGrid = memo(function MonthGrid({
   cells,
   refDate,
   plannedDays,
@@ -946,12 +987,12 @@ function MonthGrid({
       })}
     </View>
   );
-}
+});
 
 // ============================================================================
 // WeekList : 7 lignes verticales avec emoji + nb meals
 // ============================================================================
-function WeekList({
+const WeekList = memo(function WeekList({
   cells,
   plannedDays,
   ranges,
@@ -1081,7 +1122,7 @@ function WeekList({
       })}
     </View>
   );
-}
+});
 
 // ============================================================================
 // Helpers
@@ -1127,15 +1168,6 @@ const styles = StyleSheet.create({
   },
   titleRowRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   title: { fontWeight: '700' },
-
-  navRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: -8,
-    marginBottom: -4,
-  },
-  navLabel: { textAlign: 'center', fontWeight: '700' },
 
   loaderRow: { padding: 20, alignItems: 'center' },
   swipeArea: { flex: 1 },
