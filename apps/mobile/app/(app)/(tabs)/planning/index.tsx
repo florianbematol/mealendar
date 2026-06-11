@@ -14,39 +14,78 @@ import dayjs from 'dayjs';
 import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
+import { Calendar, type DateData, LocaleConfig } from 'react-native-calendars';
+import type { MarkedDates } from 'react-native-calendars/src/types';
 import { Button, Dialog, Portal, Text, TextInput, useTheme } from 'react-native-paper';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import DateTimePicker, { type CalendarDay, useDefaultStyles } from 'react-native-ui-datepicker';
+
+// ============================================================================
+// Locale FR pour react-native-calendars (a faire une seule fois au module)
+// ============================================================================
+LocaleConfig.locales.fr = {
+  monthNames: [
+    'Janvier',
+    'Fevrier',
+    'Mars',
+    'Avril',
+    'Mai',
+    'Juin',
+    'Juillet',
+    'Aout',
+    'Septembre',
+    'Octobre',
+    'Novembre',
+    'Decembre',
+  ],
+  monthNamesShort: [
+    'Janv.',
+    'Fevr.',
+    'Mars',
+    'Avr.',
+    'Mai',
+    'Juin',
+    'Juil.',
+    'Aout',
+    'Sept.',
+    'Oct.',
+    'Nov.',
+    'Dec.',
+  ],
+  dayNames: ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'],
+  dayNamesShort: ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'],
+  today: "Aujourd'hui",
+};
+LocaleConfig.defaultLocale = 'fr';
 
 /**
- * Page Planning : calendrier mois base sur react-native-ui-datepicker.
+ * Page Planning : calendrier mois base sur react-native-calendars.
+ *
+ * Marking :
+ *  - markingType "period" : les plages existantes apparaissent comme des
+ *    barres continues colorees (sans label).
+ *  - dot : les jours planifies (au moins un repas) ont un point.
+ *  - la selection de range en cours est aussi affichee en period (couleur
+ *    differente).
  *
  * Interactions :
- *  - mode "range" : l'utilisateur tape une 1ere date puis une 2e -> on
- *    propose de creer une plage de menus (modale de nom) puis on navigue
- *    vers la vue d'edition multi-jours.
- *  - tap sur un seul jour (sans 2e tap) : on attend le 2e tap. Pour ouvrir
- *    un jour isole, on tape 2 fois la meme date (range d'1 jour) -> vue jour.
- *  - jours planifies (au moins 1 repas) : marques d'un dot.
- *  - jours appartenant a une plage existante : fond colore + tap ouvre la
- *    vue range correspondante.
+ *  - 1er tap : pose le debut du range. 2e tap : si meme jour -> ouvre la
+ *    vue jour (ou la vue range si jour dans une plage existante) ; sinon
+ *    -> modale de naming -> creation plage + vue range.
  *
- * Plus de carousel custom / reanimated : la lib gere le swipe entre mois.
+ * NOTE UI : le style est laisse au theme par defaut de react-native-calendars.
+ * La customization (couleurs, police, hauteur des cellules) se fera via la
+ * prop `theme` du <Calendar> et les `selectedColor`/`color` des markedDates.
  */
-
 export default function PlanningIndexScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const tabBarHeight = 56 + Math.max(insets.bottom, 8);
-  const defaultStyles = useDefaultStyles();
 
   const householdId = useActiveHousehold((s) => s.householdId);
   const mealPlan = useMealPlan(householdId);
   const myDietPlan = useMyDietPlan(householdId);
 
-  // Mois actuellement affiche (1er jour du mois). On fetch une fenetre large
-  // autour (mois precedent -> mois suivant) pour avoir les dots prets quand
-  // on navigue.
+  // Mois visible (string YYYY-MM-DD du 1er jour). On fetch [mois-1, mois+1].
   const [visibleMonth, setVisibleMonth] = useState<string>(() => todayIso());
 
   const fetchWindow = useMemo(() => {
@@ -63,7 +102,7 @@ export default function PlanningIndexScreen() {
   const createRange = useCreateMealPlanRange();
 
   // ---------------------------------------------------------------------------
-  // Set des jours planifies (repas direct + jours couverts par coversMeals)
+  // Jours planifies (repas direct + couverts par coversMeals)
   // ---------------------------------------------------------------------------
   const plannedDays = useMemo(() => {
     const set = new Set<string>();
@@ -85,7 +124,7 @@ export default function PlanningIndexScreen() {
     return set;
   }, [meals.data, mealPlan.data]);
 
-  /** Map date -> plage existante (pour colorer + ouvrir la bonne vue). */
+  /** Map date -> plage existante (pour ouvrir la bonne vue au tap). */
   const rangeForDate = useMemo(() => {
     const map = new Map<string, MealPlanRange>();
     for (const r of ranges.data ?? []) {
@@ -99,48 +138,42 @@ export default function PlanningIndexScreen() {
   }, [ranges.data]);
 
   // ---------------------------------------------------------------------------
-  // Selection range
+  // Selection de range maison (react-native-calendars n'a pas de mode range
+  // natif : on gere start/end nous-memes via onDayPress)
   // ---------------------------------------------------------------------------
-  const [rangeStart, setRangeStart] = useState<string | undefined>(undefined);
-  const [rangeEnd, setRangeEnd] = useState<string | undefined>(undefined);
+  const [rangeStart, setRangeStart] = useState<string | null>(null);
 
-  /** Modale de naming a la creation d'une plage. */
   const [pendingRange, setPendingRange] = useState<{ from: string; to: string } | null>(null);
   const [pendingName, setPendingName] = useState('');
 
-  const onRangeChange = (params: { startDate?: unknown; endDate?: unknown }) => {
-    const start = params.startDate
-      ? dayjs(params.startDate as string).format('YYYY-MM-DD')
-      : undefined;
-    const end = params.endDate ? dayjs(params.endDate as string).format('YYYY-MM-DD') : undefined;
-    setRangeStart(start);
-    setRangeEnd(end);
+  const onDayPress = (day: DateData) => {
+    const date = day.dateString; // YYYY-MM-DD
 
-    // Si on a un range complet (start + end)
-    if (start && end) {
-      // Cas 1 : tap sur un jour qui appartient a une plage existante (et
-      // start == end == ce jour) -> ouvre la vue range de cette plage.
-      if (start === end) {
-        const existing = rangeForDate.get(start);
-        if (existing) {
-          resetRange();
-          router.push(`/(app)/(tabs)/planning/range/${existing.dateFrom}/${existing.dateTo}`);
-          return;
-        }
-        // jour isole sans plage -> vue jour
-        resetRange();
-        router.push(`/(app)/(tabs)/planning/day/${start}`);
-        return;
-      }
-      // Cas 2 : vrai range (2 dates differentes) -> modale de naming
-      setPendingRange({ from: start, to: end });
-      setPendingName(`Plage du ${dayjs(start).format('DD/MM')}`);
+    if (!rangeStart) {
+      // 1er tap : on pose le debut de la selection.
+      setRangeStart(date);
+      return;
     }
-  };
 
-  const resetRange = () => {
-    setRangeStart(undefined);
-    setRangeEnd(undefined);
+    // 2e tap
+    if (date === rangeStart) {
+      // Tap 2x le meme jour : ouvre la vue jour (ou la plage existante).
+      setRangeStart(null);
+      const existing = rangeForDate.get(date);
+      if (existing) {
+        router.push(`/(app)/(tabs)/planning/range/${existing.dateFrom}/${existing.dateTo}`);
+      } else {
+        router.push(`/(app)/(tabs)/planning/day/${date}`);
+      }
+      return;
+    }
+
+    // Range complet : on ordonne et on propose de creer une plage.
+    const from = date < rangeStart ? date : rangeStart;
+    const to = date < rangeStart ? rangeStart : date;
+    setRangeStart(null);
+    setPendingRange({ from, to });
+    setPendingName(`Plage du ${dayjs(from).format('DD/MM')}`);
   };
 
   const onConfirmRange = async () => {
@@ -149,7 +182,6 @@ export default function PlanningIndexScreen() {
     const name = pendingName.trim() || `Plage du ${dayjs(from).format('DD/MM')}`;
     setPendingRange(null);
     setPendingName('');
-    resetRange();
     try {
       await createRange.mutateAsync({ householdId, name, dateFrom: from, dateTo: to });
     } catch (e) {
@@ -161,11 +193,62 @@ export default function PlanningIndexScreen() {
   const onCancelRange = () => {
     setPendingRange(null);
     setPendingName('');
-    resetRange();
   };
 
   // ---------------------------------------------------------------------------
-  // Setup chip state
+  // Construction des markedDates pour react-native-calendars
+  //
+  // markingType="period" : pour chaque plage existante, on marque
+  // startingDay / endingDay / jours du milieu avec une couleur. Les jours
+  // planifies recoivent un dot (marked + dotColor). La selection en cours
+  // (rangeStart) recoit un selected.
+  // ---------------------------------------------------------------------------
+  const markedDates = useMemo<MarkedDates>(() => {
+    const marks: MarkedDates = {};
+
+    // 1. Plages existantes -> period
+    for (const r of ranges.data ?? []) {
+      let cur = r.dateFrom;
+      while (cur <= r.dateTo) {
+        const isStart = cur === r.dateFrom;
+        const isEnd = cur === r.dateTo;
+        marks[cur] = {
+          ...marks[cur],
+          // NOTE UI : couleur de la barre de periode (theme.colors.tertiaryContainer)
+          color: theme.colors.tertiaryContainer,
+          textColor: theme.colors.onTertiaryContainer,
+          startingDay: isStart,
+          endingDay: isEnd,
+        };
+        cur = dayjs(cur).add(1, 'day').format('YYYY-MM-DD');
+      }
+    }
+
+    // 2. Jours planifies -> dot
+    for (const d of plannedDays) {
+      marks[d] = {
+        ...marks[d],
+        marked: true,
+        // NOTE UI : couleur du dot (theme.colors.primary)
+        dotColor: theme.colors.primary,
+      };
+    }
+
+    // 3. Selection en cours -> selected
+    if (rangeStart) {
+      marks[rangeStart] = {
+        ...marks[rangeStart],
+        selected: true,
+        // NOTE UI : couleur de la cellule selectionnee
+        selectedColor: theme.colors.primary,
+      };
+    }
+
+    return marks;
+  }, [ranges.data, plannedDays, rangeStart, theme.colors]);
+
+  // ---------------------------------------------------------------------------
+  // Setup chip
   // ---------------------------------------------------------------------------
   const slotsPerWeek = mealPlan.data
     ? Object.values(mealPlan.data.slotConfig).reduce((acc, ds) => acc + (ds?.length ?? 0), 0)
@@ -180,39 +263,6 @@ export default function PlanningIndexScreen() {
     ? Object.values(myDietPlan.data.dietPlan.slots).reduce((acc, c) => acc + (c?.length ?? 0), 0)
     : 0;
   const dietRulesCount = myDietPlan.data?.dietPlan?.dailyRules?.length ?? 0;
-
-  // ---------------------------------------------------------------------------
-  // Rendu custom d'un jour : dot planifie + fond plage existante
-  // ---------------------------------------------------------------------------
-  const renderDay = (day: CalendarDay) => {
-    const dateStr = dayjs(day.date).format('YYYY-MM-DD');
-    const isPlanned = plannedDays.has(dateStr);
-    const inExistingRange = rangeForDate.has(dateStr);
-    const isToday = day.isToday;
-    return (
-      <View style={styles.dayCell}>
-        <Text
-          style={[
-            styles.dayText,
-            {
-              color: day.isCurrentMonth ? theme.colors.onSurface : theme.colors.onSurfaceVariant,
-              fontWeight: isToday ? '800' : '500',
-              opacity: day.isCurrentMonth ? 1 : 0.4,
-            },
-            isToday && { color: theme.colors.primary },
-          ]}
-        >
-          {day.text}
-        </Text>
-        <View style={styles.dayMarkers}>
-          {inExistingRange && (
-            <View style={[styles.rangeBar, { backgroundColor: theme.colors.tertiary }]} />
-          )}
-          {isPlanned && <View style={[styles.dot, { backgroundColor: theme.colors.primary }]} />}
-        </View>
-      </View>
-    );
-  };
 
   return (
     <SafeAreaView
@@ -248,34 +298,18 @@ export default function PlanningIndexScreen() {
           Tapez 2 fois un jour pour le planifier, ou selectionnez une plage de dates.
         </Text>
 
-        <DateTimePicker
-          mode="range"
-          startDate={rangeStart}
-          endDate={rangeEnd}
-          onChange={onRangeChange}
-          locale="fr"
-          firstDayOfWeek={1}
-          showOutsideDays
-          allowRangeReset
-          monthCaptionFormat="full"
-          onMonthChange={(m) => {
-            // m = index du mois (0-11) ; on reconstruit une date du 1er du mois
-            setVisibleMonth((cur) => {
-              const d = dayjs(cur).month(m).date(1);
-              return d.format('YYYY-MM-DD');
-            });
+        {/* NOTE UI : le style global du calendrier se customise via la prop
+            `theme` (couleurs du header, des jours, etc.). Laisse par defaut
+            pour l'instant. */}
+        <Calendar
+          markingType="period"
+          markedDates={markedDates}
+          onDayPress={onDayPress}
+          firstDay={1}
+          enableSwipeMonths
+          onMonthChange={(m: DateData) => {
+            setVisibleMonth(dayjs(m.dateString).date(1).format('YYYY-MM-DD'));
           }}
-          onYearChange={(y) => {
-            setVisibleMonth((cur) => dayjs(cur).year(y).date(1).format('YYYY-MM-DD'));
-          }}
-          styles={{
-            ...defaultStyles,
-            today: { borderColor: theme.colors.primary, borderWidth: 1 },
-            selected: { backgroundColor: theme.colors.tertiaryContainer },
-            selected_label: { color: theme.colors.onTertiaryContainer },
-            range_fill: { backgroundColor: theme.colors.tertiaryContainer },
-          }}
-          components={{ Day: renderDay }}
         />
       </View>
 
@@ -322,22 +356,4 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   title: { fontWeight: '700' },
-
-  // Custom day cell
-  dayCell: {
-    flex: 1,
-    aspectRatio: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 2,
-  },
-  dayText: { fontSize: 15 },
-  dayMarkers: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    height: 6,
-  },
-  dot: { width: 5, height: 5, borderRadius: 3 },
-  rangeBar: { width: 12, height: 3, borderRadius: 2 },
 });
