@@ -100,6 +100,37 @@ const FR_MONTHS = [
   'novembre',
   'decembre',
 ];
+
+/** Mois abreges FR (index 0 = janvier), utile pour les selecteurs compacts. */
+export const FR_MONTHS_SHORT = [
+  'janv.',
+  'fevr.',
+  'mars',
+  'avr.',
+  'mai',
+  'juin',
+  'juil.',
+  'aout',
+  'sept.',
+  'oct.',
+  'nov.',
+  'dec.',
+] as const;
+
+/** Construit un YYYY-MM-01 a partir d'une annee et d'un index de mois (0-11). */
+export function isoFromYearMonth(year: number, monthIndex: number): string {
+  return toIsoDate(new Date(year, monthIndex, 1));
+}
+
+/** Annee (number) d'une date ISO. */
+export function yearOf(s: string): number {
+  return fromIsoDate(s).getFullYear();
+}
+
+/** Index de mois (0-11) d'une date ISO. */
+export function monthIndexOf(s: string): number {
+  return fromIsoDate(s).getMonth();
+}
 export function formatLongDate(s: string): string {
   const d = fromIsoDate(s);
   const wd = weekdayOf(s);

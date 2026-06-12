@@ -1,12 +1,12 @@
 import { MonthCalendar } from '@/components/MonthCalendar';
+import { MonthYearPicker } from '@/components/MonthYearPicker';
 import { SetupChip } from '@/components/SetupChip';
 import { Topbar } from '@/components/Topbar';
 import { useMyDietPlan } from '@/hooks/useDietPlans';
 import { useMealPlan, useMealPlanRanges } from '@/hooks/usePlannings';
-import { addMonths, formatMonthYear, todayIso } from '@/lib/dates';
+import { addMonths, formatMonthYear } from '@/lib/dates';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import type { MealPlanRange } from '@mealendar/shared';
-import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import dayjs from 'dayjs';
 import { router } from 'expo-router';
 import { useMemo, useRef, useState } from 'react';
@@ -14,7 +14,6 @@ import {
   Animated,
   Dimensions,
   PanResponder,
-  Platform,
   StyleSheet,
   TouchableOpacity,
   View,
@@ -27,7 +26,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
  *
  * - Grille pleine hauteur, bandes nommees pour les plages.
  * - Slide gauche/droite pour changer de mois (carousel 3 mois + PanResponder).
- * - Tap nom du mois : date-picker natif pour sauter mois/annee.
+ * - Tap nom du mois : selecteur mois/annee en pur JS (MonthYearPicker).
  * - Tap sur un jour : si dans une plage -> ouvre la plage ; sinon -> ouvre la
  *   vue range avec ce seul jour (les dates s'ajustent sur cet ecran).
  */
@@ -42,12 +41,21 @@ export default function PlanningIndexScreen() {
   const myDietPlan = useMyDietPlan(householdId);
   const ranges = useMealPlanRanges(householdId);
 
-  // Mois affiche (string YYYY-MM-DD, 1er du mois).
-  const [month, setMonth] = useState<string>(() => dayjs().date(1).format('YYYY-MM-DD'));
-  const [showPicker, setShowPicker] = useState(false);
-
+  // ---------------------------------------------------------------------------
+  // Modele du carousel : un mois de base STABLE + un offset entier.
+  //   mois affiche = addMonths(baseMonth, offset)
+  // On rend une fenetre de (2*WINDOW+1) mois autour de l'offset, tous montes
+  // a l'avance (positionnes en absolu), pour eviter tout lag au slide.
+  // ---------------------------------------------------------------------------
+  const WINDOW = 3; // nombre de mois pre-rendus de chaque cote
   const currentMonth = dayjs().date(1).format('YYYY-MM-DD');
+  const baseMonth = useRef(currentMonth).current; // jamais reconstruit
+  const [offset, setOffset] = useState(0);
+
+  const month = addMonths(baseMonth, offset);
   const isCurrentMonth = month === currentMonth;
+
+  const [showPicker, setShowPicker] = useState(false);
 
   /** Map date -> plage existante (tap -> ouvrir la bonne vue). */
   const rangeForDate = useMemo(() => {
@@ -75,26 +83,29 @@ export default function PlanningIndexScreen() {
 
   // ---------------------------------------------------------------------------
   // Slide horizontal entre mois (Animated natif, sans reanimated)
-  // Carousel 3 mois : [prev, current, next]. translateX initial = -screenW.
+  // translateX represente le decalage du "ruban" : au repos il vaut
+  // -offset * screenW (le mois courant est centre dans le viewport).
   // ---------------------------------------------------------------------------
-  const translateX = useRef(new Animated.Value(-screenW)).current;
+  const translateX = useRef(new Animated.Value(0)).current;
   const isAnimating = useRef(false);
+  // offset courant accessible dans les closures du PanResponder (qui est memo).
+  const offsetRef = useRef(0);
+  offsetRef.current = offset;
 
-  const commit = (direction: -1 | 1) => {
-    setMonth((m) => addMonths(m, direction));
-    // Apres le commit, on re-centre instantanement (le nouveau mois courant
-    // est deja affiche au centre du carousel reconstruit).
-    translateX.setValue(-screenW);
-    isAnimating.current = false;
+  // Recentre le ruban sur l'offset donne (instantane).
+  const recenter = (o: number) => {
+    translateX.setValue(-o * screenW);
   };
 
-  /** Revient au mois courant (sans animation de slide). */
-  const goToToday = () => {
-    setMonth(currentMonth);
-    translateX.setValue(-screenW);
+  const goToMonth = (newOffset: number) => {
+    setOffset(newOffset);
+    recenter(newOffset);
   };
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: commit/translateX stables, on ne recree le responder que sur changement de largeur
+  /** Revient au mois courant. */
+  const goToToday = () => goToMonth(0);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refs stables, recree seulement sur changement de largeur
   const panResponder = useMemo(
     () =>
       PanResponder.create({
@@ -102,45 +113,37 @@ export default function PlanningIndexScreen() {
           Math.abs(g.dx) > 12 && Math.abs(g.dx) > Math.abs(g.dy) * 1.4,
         onPanResponderMove: (_, g) => {
           if (isAnimating.current) return;
-          translateX.setValue(-screenW + g.dx);
+          translateX.setValue(-offsetRef.current * screenW + g.dx);
         },
         onPanResponderRelease: (_, g) => {
           if (isAnimating.current) return;
           const threshold = screenW * 0.25;
-          if (g.dx > threshold) {
+          const cur = offsetRef.current;
+          const settle = (next: number) => {
             isAnimating.current = true;
             Animated.timing(translateX, {
-              toValue: 0,
+              toValue: -next * screenW,
               duration: 200,
               useNativeDriver: true,
-            }).start(() => commit(-1));
-          } else if (g.dx < -threshold) {
-            isAnimating.current = true;
-            Animated.timing(translateX, {
-              toValue: -screenW * 2,
-              duration: 200,
-              useNativeDriver: true,
-            }).start(() => commit(1));
-          } else {
-            Animated.spring(translateX, {
-              toValue: -screenW,
-              useNativeDriver: true,
-            }).start();
-          }
+            }).start(() => {
+              isAnimating.current = false;
+              if (next !== cur) setOffset(next);
+            });
+          };
+          if (g.dx > threshold) settle(cur - 1);
+          else if (g.dx < -threshold) settle(cur + 1);
+          else settle(cur);
         },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [screenW],
   );
 
-  const onPickerChange = (event: DateTimePickerEvent, date?: Date) => {
-    // Android : l'event 'dismissed' ferme sans changer. 'set' applique.
-    if (Platform.OS === 'android') setShowPicker(false);
-    if (event.type === 'set' && date) {
-      setMonth(dayjs(date).date(1).format('YYYY-MM-DD'));
-      translateX.setValue(-screenW);
-      if (Platform.OS === 'ios') setShowPicker(false);
-    }
+  const onPickerConfirm = (isoMonth: string) => {
+    // Convertit le mois choisi en offset par rapport au baseMonth stable.
+    const diff = dayjs(isoMonth).diff(dayjs(baseMonth), 'month');
+    goToMonth(diff);
+    setShowPicker(false);
   };
 
   // ---------------------------------------------------------------------------
@@ -178,18 +181,17 @@ export default function PlanningIndexScreen() {
             </Text>
           </TouchableOpacity>
           <View style={styles.headerActions}>
-            {!isCurrentMonth && (
-              <Button
-                mode="text"
-                compact
-                onPress={goToToday}
-                icon="calendar-today"
-                style={styles.todayBtn}
-                labelStyle={styles.todayBtnLabel}
-              >
-                Aujourd'hui
-              </Button>
-            )}
+            <Button
+              mode="text"
+              compact
+              onPress={goToToday}
+              icon="calendar-today"
+              disabled={isCurrentMonth}
+              style={styles.todayBtn}
+              labelStyle={styles.todayBtnLabel}
+            >
+              Aujourd'hui
+            </Button>
             <SetupChip
               iconOnly
               mealPlanConfigured={!!mealPlan.data}
@@ -209,41 +211,38 @@ export default function PlanningIndexScreen() {
           </View>
         </View>
 
-        {/* Carousel 3 mois (prev / current / next) qui slide horizontalement */}
+        {/* Ruban de mois pre-rendus (fenetre -WINDOW..+WINDOW autour de l'offset).
+            Chaque mois est positionne en absolu a left = slideOffset * screenW ;
+            le ruban est translate pour centrer l'offset courant. Les voisins
+            sont deja montes -> aucun lag au slide. */}
         <View style={styles.carouselViewport} {...panResponder.panHandlers}>
-          <Animated.View
-            style={[styles.carousel, { width: screenW * 3, transform: [{ translateX }] }]}
-          >
-            <MonthCalendar
-              month={addMonths(month, -1)}
-              ranges={allRanges}
-              width={screenW}
-              onDayPress={onDayPress}
-            />
-            <MonthCalendar
-              month={month}
-              ranges={allRanges}
-              width={screenW}
-              onDayPress={onDayPress}
-            />
-            <MonthCalendar
-              month={addMonths(month, 1)}
-              ranges={allRanges}
-              width={screenW}
-              onDayPress={onDayPress}
-            />
+          <Animated.View style={[styles.carousel, { transform: [{ translateX }] }]}>
+            {Array.from({ length: WINDOW * 2 + 1 }, (_, i) => {
+              const slideOffset = offset - WINDOW + i;
+              return (
+                <View
+                  key={slideOffset}
+                  style={[styles.slide, { left: slideOffset * screenW, width: screenW }]}
+                >
+                  <MonthCalendar
+                    month={addMonths(baseMonth, slideOffset)}
+                    ranges={allRanges}
+                    width={screenW}
+                    onDayPress={onDayPress}
+                  />
+                </View>
+              );
+            })}
           </Animated.View>
         </View>
       </View>
 
-      {showPicker && (
-        <DateTimePicker
-          value={dayjs(month).toDate()}
-          mode="date"
-          display="default"
-          onChange={onPickerChange}
-        />
-      )}
+      <MonthYearPicker
+        visible={showPicker}
+        value={month}
+        onConfirm={onPickerConfirm}
+        onDismiss={() => setShowPicker(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -262,7 +261,9 @@ const styles = StyleSheet.create({
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   todayBtn: { marginRight: -4 },
   todayBtnLabel: { fontSize: 13, marginVertical: 0 },
-  // Le viewport masque les mois prev/next hors ecran.
+  // Le viewport masque les mois hors ecran.
   carouselViewport: { flex: 1, overflow: 'hidden' },
-  carousel: { flex: 1, flexDirection: 'row' },
+  // Le ruban occupe tout le viewport ; les slides sont positionnes en absolu.
+  carousel: { flex: 1 },
+  slide: { position: 'absolute', top: 0, bottom: 0 },
 });
