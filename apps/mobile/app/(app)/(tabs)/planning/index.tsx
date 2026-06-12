@@ -19,7 +19,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { Text, useTheme } from 'react-native-paper';
+import { Button, Text, useTheme } from 'react-native-paper';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 /**
@@ -45,6 +45,9 @@ export default function PlanningIndexScreen() {
   // Mois affiche (string YYYY-MM-DD, 1er du mois).
   const [month, setMonth] = useState<string>(() => dayjs().date(1).format('YYYY-MM-DD'));
   const [showPicker, setShowPicker] = useState(false);
+
+  const currentMonth = dayjs().date(1).format('YYYY-MM-DD');
+  const isCurrentMonth = month === currentMonth;
 
   /** Map date -> plage existante (tap -> ouvrir la bonne vue). */
   const rangeForDate = useMemo(() => {
@@ -83,6 +86,12 @@ export default function PlanningIndexScreen() {
     // est deja affiche au centre du carousel reconstruit).
     translateX.setValue(-screenW);
     isAnimating.current = false;
+  };
+
+  /** Revient au mois courant (sans animation de slide). */
+  const goToToday = () => {
+    setMonth(currentMonth);
+    translateX.setValue(-screenW);
   };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: commit/translateX stables, on ne recree le responder que sur changement de largeur
@@ -161,29 +170,43 @@ export default function PlanningIndexScreen() {
       <Topbar />
 
       <View style={[styles.container, { paddingBottom: tabBarHeight }]}>
-        {/* Header : nom du mois (cliquable -> picker) + SetupChip */}
+        {/* Header : nom du mois (cliquable -> picker) + bouton Aujourd'hui + SetupChip */}
         <View style={styles.headerRow}>
           <TouchableOpacity onPress={() => setShowPicker(true)} activeOpacity={0.6}>
             <Text variant="headlineSmall" style={styles.monthTitle}>
               {formatMonthYear(month)}
             </Text>
           </TouchableOpacity>
-          <SetupChip
-            iconOnly
-            mealPlanConfigured={!!mealPlan.data}
-            dietPlanConfigured={dietPlanConfigured}
-            mealPlanSummary={mealPlan.data ? `${slotsPerWeek} repas / semaine` : null}
-            dietPlanSummary={
-              dietPlanConfigured
-                ? `${dietComponentsCount} composant${dietComponentsCount > 1 ? 's' : ''}${
-                    dietRulesCount > 0
-                      ? ` · ${dietRulesCount} regle${dietRulesCount > 1 ? 's' : ''}`
-                      : ''
-                  }`
-                : null
-            }
-            loading={mealPlan.isPending || myDietPlan.isPending}
-          />
+          <View style={styles.headerActions}>
+            {!isCurrentMonth && (
+              <Button
+                mode="text"
+                compact
+                onPress={goToToday}
+                icon="calendar-today"
+                style={styles.todayBtn}
+                labelStyle={styles.todayBtnLabel}
+              >
+                Aujourd'hui
+              </Button>
+            )}
+            <SetupChip
+              iconOnly
+              mealPlanConfigured={!!mealPlan.data}
+              dietPlanConfigured={dietPlanConfigured}
+              mealPlanSummary={mealPlan.data ? `${slotsPerWeek} repas / semaine` : null}
+              dietPlanSummary={
+                dietPlanConfigured
+                  ? `${dietComponentsCount} composant${dietComponentsCount > 1 ? 's' : ''}${
+                      dietRulesCount > 0
+                        ? ` · ${dietRulesCount} regle${dietRulesCount > 1 ? 's' : ''}`
+                        : ''
+                    }`
+                  : null
+              }
+              loading={mealPlan.isPending || myDietPlan.isPending}
+            />
+          </View>
         </View>
 
         {/* Carousel 3 mois (prev / current / next) qui slide horizontalement */}
@@ -236,6 +259,9 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   monthTitle: { fontWeight: '800' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  todayBtn: { marginRight: -4 },
+  todayBtnLabel: { fontSize: 13, marginVertical: 0 },
   // Le viewport masque les mois prev/next hors ecran.
   carouselViewport: { flex: 1, overflow: 'hidden' },
   carousel: { flex: 1, flexDirection: 'row' },
