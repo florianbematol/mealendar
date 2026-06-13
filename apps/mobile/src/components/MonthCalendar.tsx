@@ -146,22 +146,21 @@ export const MonthCalendar = memo(function MonthCalendar({
                 return (
                   <TouchableOpacity
                     key={date}
-                    style={[styles.cell, { borderColor: theme.colors.outlineVariant }]}
+                    style={[
+                      styles.cell,
+                      { borderColor: theme.colors.outlineVariant },
+                      isToday && { backgroundColor: theme.colors.primaryContainer },
+                    ]}
                     activeOpacity={0.6}
                     onPress={() => onDayPress(date)}
                   >
-                    <View
-                      style={[
-                        styles.dayNumWrap,
-                        isToday && { backgroundColor: theme.colors.primary },
-                      ]}
-                    >
+                    <View style={styles.dayNumWrap}>
                       <Text
                         style={[
                           styles.dayNum,
                           {
                             color: isToday
-                              ? theme.colors.onPrimary
+                              ? theme.colors.primary
                               : inMonth
                                 ? theme.colors.onSurface
                                 : theme.colors.onSurfaceVariant,
