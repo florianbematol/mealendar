@@ -2,6 +2,7 @@ import { DietComponentChips } from '@/components/DietComponentChips';
 import { GenerateRecipeModal } from '@/components/GenerateRecipeModal';
 import { useHouseholdDetail } from '@/hooks/useHouseholds';
 import {
+  useCreateMealPlanRange,
   useDeleteMealPlanRange,
   useDeletePlannedMeal,
   useDuplicateMealsRange,
@@ -94,6 +95,7 @@ export default function PlanningRangeScreen() {
   const duplicateRange = useDuplicateMealsRange(householdId ?? '');
   const allRanges = useMealPlanRanges(householdId);
   const deleteRange = useDeleteMealPlanRange(householdId ?? '');
+  const createRange = useCreateMealPlanRange();
 
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -243,6 +245,29 @@ export default function PlanningRangeScreen() {
   // ===========================================================================
   // Actions globales : Aleatoire / IA / Effacer sur le range
   // ===========================================================================
+  /**
+   * Assure qu'une plage [from,to] (sans nom) existe pour cette periode. Appelee
+   * apres qu'un repas a ete pose, pour que la plage apparaisse sur le calendrier.
+   * Idempotent : ne cree rien si une plage couvre deja exactement [from,to].
+   */
+  const ensureRange = async () => {
+    if (!householdId) return;
+    const exists = (allRanges.data ?? []).some(
+      (r) => r.dateFrom === fromDate && r.dateTo === toDate,
+    );
+    if (exists) return;
+    try {
+      await createRange.mutateAsync({
+        householdId,
+        name: '',
+        dateFrom: fromDate,
+        dateTo: toDate,
+      });
+    } catch {
+      // Non bloquant : si la creation de plage echoue, le repas est quand meme pose.
+    }
+  };
+
   const onGenerateRandom = async () => {
     if (!householdId || !mealPlan.data) {
       Alert.alert('Plan-type requis', "Configurez d'abord votre plan-type.", [
@@ -274,6 +299,7 @@ export default function PlanningRangeScreen() {
         meals: generated,
         keepLocked: true,
       });
+      await ensureRange();
       haptics.success();
     } catch (e) {
       haptics.error();
@@ -305,6 +331,7 @@ export default function PlanningRangeScreen() {
                 dateTo: toDate,
                 keepLocked: true,
               });
+              await ensureRange();
               haptics.success();
               const skippedTxt =
                 res.skipped > 0
@@ -520,6 +547,7 @@ export default function PlanningRangeScreen() {
         Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
       }
     }
+    await ensureRange();
     setRecipePickerOpen(false);
     setPickerTarget(null);
     setPickerCoversMeals(1);
@@ -603,6 +631,7 @@ export default function PlanningRangeScreen() {
           mealId: existing.id,
           input: { recipeId, customTitle: null },
         });
+        await ensureRange();
       } catch (e) {
         Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
       }
@@ -641,6 +670,7 @@ export default function PlanningRangeScreen() {
           },
         ],
       });
+      await ensureRange();
     } catch (e) {
       Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
     }

@@ -110,7 +110,7 @@ export const MonthCalendar = memo(function MonthCalendar({
       out.push({
         rangeId: range.id,
         name: range.name,
-        color: colorForRange(range.name),
+        color: colorForRange(range.name || range.id),
         lane,
         startCol,
         spanCols: endCol - startCol + 1,

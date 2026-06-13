@@ -881,7 +881,7 @@ export type MealPlanRange = z.infer<typeof MealPlanRangeSchema>;
 
 export const CreateMealPlanRangeInputSchema = z.object({
   householdId: UuidSchema,
-  name: z.string().min(1).max(80),
+  name: z.string().max(80), // peut etre vide : plage sans nom
   dateFrom: z.string(),
   dateTo: z.string(),
 });
