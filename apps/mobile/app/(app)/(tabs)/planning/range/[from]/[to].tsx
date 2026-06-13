@@ -41,6 +41,7 @@ import {
   Button,
   Chip,
   Dialog,
+  Divider,
   IconButton,
   Menu,
   Portal,
@@ -96,6 +97,7 @@ export default function PlanningRangeScreen() {
 
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [fillOpen, setFillOpen] = useState(false);
 
   const memberCount = Math.max(1, household.data?.members.length ?? 4);
 
@@ -118,11 +120,11 @@ export default function PlanningRangeScreen() {
   // Ref vers les dernieres actions/etats, pour que le Menu du header appelle
   // toujours des closures fraiches sans avoir a recreer le headerRight.
   const headerActionsRef = useRef<{
-    onRandom: () => void;
-    onLlm: () => void;
     onDuplicate: () => void;
+    onClear: () => void;
+    onDelete: () => void;
     busy: boolean;
-  }>({ onRandom: () => {}, onLlm: () => {}, onDuplicate: () => {}, busy: false });
+  }>({ onDuplicate: () => {}, onClear: () => {}, onDelete: () => {}, busy: false });
 
   useLayoutEffect(() => {
     if (!fromDate || !toDate) return;
@@ -150,24 +152,6 @@ export default function PlanningRangeScreen() {
             anchor={<IconButton icon="dots-vertical" size={20} onPress={() => setMenuOpen(true)} />}
           >
             <Menu.Item
-              leadingIcon="dice-multiple-outline"
-              title="Remplir aleatoirement"
-              disabled={headerActionsRef.current.busy}
-              onPress={() => {
-                setMenuOpen(false);
-                headerActionsRef.current.onRandom();
-              }}
-            />
-            <Menu.Item
-              leadingIcon="auto-fix"
-              title="Generer avec l'IA"
-              disabled={headerActionsRef.current.busy}
-              onPress={() => {
-                setMenuOpen(false);
-                headerActionsRef.current.onLlm();
-              }}
-            />
-            <Menu.Item
               leadingIcon="content-duplicate"
               title="Dupliquer cette plage"
               disabled={headerActionsRef.current.busy}
@@ -176,12 +160,32 @@ export default function PlanningRangeScreen() {
                 headerActionsRef.current.onDuplicate();
               }}
             />
+            <Menu.Item
+              leadingIcon="delete-sweep-outline"
+              title="Effacer les repas"
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onClear();
+              }}
+            />
+            <Divider />
+            <Menu.Item
+              leadingIcon="trash-can-outline"
+              title="Supprimer la plage"
+              titleStyle={{ color: theme.colors.error }}
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onDelete();
+              }}
+            />
           </Menu>
         </View>
       ),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navigation, fromDate, toDate, dayCount, menuOpen]);
+  }, [navigation, fromDate, toDate, dayCount, menuOpen, theme.colors.error]);
 
   const allMeals = meals.data?.meals ?? [];
 
@@ -647,9 +651,9 @@ export default function PlanningRangeScreen() {
   // ===========================================================================
   // Met a jour la ref consommee par le Menu du header a chaque render.
   headerActionsRef.current = {
-    onRandom: onGenerateRandom,
-    onLlm: onGenerateLlm,
     onDuplicate: () => setDuplicateOpen(true),
+    onClear: onClearRange,
+    onDelete: onDeleteRange,
     busy: setMeals.isPending || generateLlm.isPending,
   };
 
@@ -682,38 +686,6 @@ export default function PlanningRangeScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]} edges={[]}>
-      {/* Barre d'actions fixe en haut, toujours visible */}
-      <View style={[styles.topBar, { borderBottomColor: theme.colors.outlineVariant }]}>
-        <IconButton
-          icon="trash-can-outline"
-          mode="outlined"
-          iconColor={theme.colors.error}
-          containerColor={theme.colors.errorContainer}
-          onPress={onDeleteRange}
-          disabled={setMeals.isPending || generateLlm.isPending || deleteRange.isPending}
-          style={styles.deleteBtn}
-        />
-        <Button
-          mode="outlined"
-          icon="delete-sweep-outline"
-          onPress={onClearRange}
-          disabled={setMeals.isPending || generateLlm.isPending}
-          style={styles.topBtn}
-          contentStyle={styles.btnContent}
-        >
-          Effacer
-        </Button>
-        <Button
-          mode="contained"
-          icon="check"
-          onPress={() => router.back()}
-          style={styles.topBtn}
-          contentStyle={styles.btnContent}
-        >
-          Terminer
-        </Button>
-      </View>
-
       <ScrollView
         contentContainerStyle={styles.container}
         refreshControl={
@@ -945,6 +917,54 @@ export default function PlanningRangeScreen() {
         })}
       </ScrollView>
 
+      {/* Barre d'action principale fixe en bas : remplir le planning */}
+      <View style={[styles.bottomBar, { borderTopColor: theme.colors.outlineVariant }]}>
+        <Button
+          mode="contained"
+          icon="playlist-plus"
+          onPress={() => setFillOpen(true)}
+          disabled={setMeals.isPending || generateLlm.isPending}
+          style={styles.fillBtn}
+          contentStyle={styles.fillBtnContent}
+        >
+          Remplir le planning
+        </Button>
+      </View>
+
+      {/* Choix du mode de remplissage : Aleatoire ou IA */}
+      <Portal>
+        <Dialog visible={fillOpen} onDismiss={() => setFillOpen(false)}>
+          <Dialog.Title>Remplir le planning</Dialog.Title>
+          <Dialog.Content style={{ gap: 8 }}>
+            <Button
+              mode="contained"
+              icon="dice-multiple-outline"
+              onPress={() => {
+                setFillOpen(false);
+                onGenerateRandom();
+              }}
+              contentStyle={styles.fillChoiceContent}
+            >
+              Aleatoire (depuis mes recettes)
+            </Button>
+            <Button
+              mode="contained-tonal"
+              icon="auto-fix"
+              onPress={() => {
+                setFillOpen(false);
+                onGenerateLlm();
+              }}
+              contentStyle={styles.fillChoiceContent}
+            >
+              Generer avec l'IA
+            </Button>
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={() => setFillOpen(false)}>Annuler</Button>
+          </Dialog.Actions>
+        </Dialog>
+      </Portal>
+
       {/* Dialog de duplication : raccourcis +7j / +14j / +28j */}
       <Portal>
         <Dialog visible={duplicateOpen} onDismiss={() => setDuplicateOpen(false)}>
@@ -1132,17 +1152,15 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   container: { padding: 16, gap: 12, paddingBottom: 32 },
 
-  btnContent: { paddingVertical: 4 },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+  bottomBar: {
     paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingTop: 10,
+    paddingBottom: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
-  topBtn: { flex: 1, borderRadius: 12 },
-  deleteBtn: { margin: 0, borderRadius: 12 },
+  fillBtn: { borderRadius: 14 },
+  fillBtnContent: { paddingVertical: 6 },
+  fillChoiceContent: { paddingVertical: 6, justifyContent: 'flex-start' },
   busyRow: {
     flexDirection: 'row',
     alignItems: 'center',
