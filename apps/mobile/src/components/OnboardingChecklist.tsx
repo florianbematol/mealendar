@@ -9,7 +9,9 @@
  * Quand toutes les etapes sont validees, le composant ne rend rien
  * (il disparait completement, sans tracer "100%").
  */
+import { useAuth } from '@/hooks/useAuth';
 import { useMyDietPlan } from '@/hooks/useDietPlans';
+import { useHouseholdDetail } from '@/hooks/useHouseholds';
 import { useMealPlan, useMealsRange } from '@/hooks/usePlannings';
 import { useRecipes } from '@/hooks/useRecipes';
 import { addDays, startOfWeek, todayIso } from '@/lib/dates';
@@ -32,10 +34,13 @@ type Step = {
 export function OnboardingChecklist() {
   const theme = useTheme();
   const householdId = useActiveHousehold((s) => s.householdId);
+  const { session } = useAuth();
 
   const mealPlan = useMealPlan(householdId);
   const myDietPlan = useMyDietPlan(householdId);
   const recipes = useRecipes(householdId);
+  const householdDetail = useHouseholdDetail(householdId);
+  const isOwner = !!session?.user?.id && householdDetail.data?.ownerId === session.user.id;
   const weekRange = useMemo(() => {
     const start = startOfWeek(todayIso());
     return { from: start, to: addDays(start, 6) };
@@ -59,14 +64,19 @@ export function OnboardingChecklist() {
   const hasMealsThisWeek = (meals.data?.meals.length ?? 0) > 0;
 
   const steps: Step[] = [
-    {
-      key: 'meal-plan',
-      label: 'Configurer mon plan-type',
-      description: 'Definissez les repas de la semaine (petit-dej, dejeuner, diner...).',
-      icon: 'calendar-clock',
-      done: slotConfigured,
-      onPress: () => router.push('/(app)/(tabs)/planning/meal-plan'),
-    },
+    // Etape reservee au proprietaire : configurer la semaine type du foyer.
+    ...(isOwner
+      ? [
+          {
+            key: 'meal-plan',
+            label: 'Configurer mon plan-type',
+            description: 'Definissez les repas de la semaine (petit-dej, dejeuner, diner...).',
+            icon: 'calendar-clock',
+            done: slotConfigured,
+            onPress: () => router.push('/(app)/(tabs)/planning/meal-plan'),
+          } as Step,
+        ]
+      : []),
     {
       key: 'diet-plan',
       label: 'Mon plan alimentaire',

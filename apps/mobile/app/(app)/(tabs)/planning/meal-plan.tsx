@@ -1,3 +1,5 @@
+import { useAuth } from '@/hooks/useAuth';
+import { useHouseholdDetail } from '@/hooks/useHouseholds';
 import { useMealPlan, useUpsertMealPlan } from '@/hooks/usePlannings';
 import { ApiError } from '@/lib/api';
 import { WEEKDAYS, WEEKDAY_LABELS, type Weekday } from '@/lib/dates';
@@ -45,6 +47,9 @@ export default function MealPlanScreen() {
   const householdId = useActiveHousehold((s) => s.householdId);
   const mealPlan = useMealPlan(householdId);
   const upsert = useUpsertMealPlan();
+  const { session } = useAuth();
+  const householdDetail = useHouseholdDetail(householdId);
+  const isOwner = !!session?.user?.id && householdDetail.data?.ownerId === session.user.id;
 
   const [name, setName] = useState('Semaine type');
   const [config, setConfig] = useState<SlotConfig>(DEFAULT_CONFIG);
@@ -104,6 +109,30 @@ export default function MealPlanScreen() {
       <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
         <ActivityIndicator size="large" color={theme.colors.primary} />
       </View>
+    );
+  }
+
+  // Config reservee au proprietaire du foyer : les autres membres voient un
+  // message en lecture seule (le serveur refuse aussi l'ecriture, cf. RPC).
+  if (!householdDetail.isPending && !isOwner) {
+    return (
+      <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]} edges={[]}>
+        <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+          <IconButton icon="lock-outline" size={40} iconColor={theme.colors.onSurfaceVariant} />
+          <Text variant="titleMedium" style={{ textAlign: 'center' }}>
+            Reserve au proprietaire du foyer
+          </Text>
+          <Text
+            variant="bodyMedium"
+            style={{ color: theme.colors.onSurfaceVariant, textAlign: 'center', marginTop: 8 }}
+          >
+            Seul le createur du foyer peut configurer la semaine type.
+          </Text>
+          <Button mode="contained" onPress={() => router.back()} style={{ marginTop: 20 }}>
+            Retour
+          </Button>
+        </View>
+      </SafeAreaView>
     );
   }
 
