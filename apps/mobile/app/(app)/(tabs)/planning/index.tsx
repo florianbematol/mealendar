@@ -1,9 +1,7 @@
 import { MonthCalendar } from '@/components/MonthCalendar';
 import { MonthYearPicker } from '@/components/MonthYearPicker';
-import { SetupChip } from '@/components/SetupChip';
 import { Topbar } from '@/components/Topbar';
-import { useMyDietPlan } from '@/hooks/useDietPlans';
-import { useMealPlan, useMealPlanRanges } from '@/hooks/usePlannings';
+import { useMealPlanRanges } from '@/hooks/usePlannings';
 import { addMonths, formatLongDate, formatMonthYear } from '@/lib/dates';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import type { MealPlanRange } from '@mealendar/shared';
@@ -37,8 +35,6 @@ export default function PlanningIndexScreen() {
   const screenW = Dimensions.get('window').width;
 
   const householdId = useActiveHousehold((s) => s.householdId);
-  const mealPlan = useMealPlan(householdId);
-  const myDietPlan = useMyDietPlan(householdId);
   const ranges = useMealPlanRanges(householdId);
 
   // ---------------------------------------------------------------------------
@@ -163,23 +159,6 @@ export default function PlanningIndexScreen() {
     setShowPicker(false);
   };
 
-  // ---------------------------------------------------------------------------
-  // Setup chip
-  // ---------------------------------------------------------------------------
-  const slotsPerWeek = mealPlan.data
-    ? Object.values(mealPlan.data.slotConfig).reduce((acc, ds) => acc + (ds?.length ?? 0), 0)
-    : 0;
-  const dietPlanConfigured =
-    !!myDietPlan.data &&
-    (myDietPlan.data.regimes.length > 0 ||
-      myDietPlan.data.allergies.length > 0 ||
-      myDietPlan.data.goals.length > 0 ||
-      Object.values(myDietPlan.data.dietPlan.slots).some((s) => (s ?? []).length > 0));
-  const dietComponentsCount = myDietPlan.data
-    ? Object.values(myDietPlan.data.dietPlan.slots).reduce((acc, c) => acc + (c?.length ?? 0), 0)
-    : 0;
-  const dietRulesCount = myDietPlan.data?.dietPlan?.dailyRules?.length ?? 0;
-
   const allRanges = ranges.data ?? [];
 
   return (
@@ -190,7 +169,7 @@ export default function PlanningIndexScreen() {
       <Topbar />
 
       <View style={[styles.container, { paddingBottom: tabBarHeight }]}>
-        {/* Header : nom du mois (cliquable -> picker) + bouton Aujourd'hui + SetupChip */}
+        {/* Header : nom du mois (cliquable -> picker) + bouton Aujourd'hui */}
         <View style={styles.headerRow}>
           <TouchableOpacity onPress={() => setShowPicker(true)} activeOpacity={0.6}>
             <Text variant="headlineSmall" style={styles.monthTitle}>
@@ -209,22 +188,6 @@ export default function PlanningIndexScreen() {
             >
               Aujourd'hui
             </Button>
-            <SetupChip
-              iconOnly
-              mealPlanConfigured={!!mealPlan.data}
-              dietPlanConfigured={dietPlanConfigured}
-              mealPlanSummary={mealPlan.data ? `${slotsPerWeek} repas / semaine` : null}
-              dietPlanSummary={
-                dietPlanConfigured
-                  ? `${dietComponentsCount} composant${dietComponentsCount > 1 ? 's' : ''}${
-                      dietRulesCount > 0
-                        ? ` · ${dietRulesCount} regle${dietRulesCount > 1 ? 's' : ''}`
-                        : ''
-                    }`
-                  : null
-              }
-              loading={mealPlan.isPending || myDietPlan.isPending}
-            />
           </View>
         </View>
 

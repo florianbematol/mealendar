@@ -176,6 +176,37 @@ export default function ProfileScreen() {
 
         <Divider style={styles.divider} />
 
+        {/* Configuration du foyer */}
+        <View style={styles.section}>
+          <Text variant="labelLarge" style={styles.sectionTitle}>
+            Configuration du foyer
+          </Text>
+          <Surface
+            elevation={0}
+            style={[styles.linkRow, { backgroundColor: theme.colors.surface }]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text variant="titleSmall" style={{ fontWeight: '700' }}>
+                Semaine type
+              </Text>
+              <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                Quels repas planifier chaque jour de la semaine.
+              </Text>
+            </View>
+            <Button
+              mode="text"
+              compact
+              icon="chevron-right"
+              contentStyle={{ flexDirection: 'row-reverse' }}
+              onPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
+            >
+              Editer
+            </Button>
+          </Surface>
+        </View>
+
+        <Divider style={styles.divider} />
+
         {/* Profil dietetique */}
         <View style={styles.section}>
           <Text variant="labelLarge" style={styles.sectionTitle}>
