@@ -1,10 +1,8 @@
 import {
-  CreatePlanningInputSchema,
   type MealPlan,
+  type MealsRange,
   type PlannedMeal,
-  type Planning,
-  type PlanningWithMeals,
-  SetPlanningMealsInputSchema,
+  SetMealsRangeInputSchema,
   type ShoppingItem,
   type ShoppingListResponse,
   UpdatePlannedMealInputSchema,
@@ -17,12 +15,19 @@ import { type IcsEvent, buildIcs } from '../lib/ics';
 import { getUserClient } from '../lib/supabase';
 import { getAuth, requireAuth } from '../middleware/auth';
 
+/**
+ * Routes "planning" version calendrier libre.
+ *
+ * Plus d'entite "planning" : les meals sont rattaches directement au foyer
+ * (planned_meals.household_id) + une date. Le client demande un range
+ * arbitraire [from, to] pour afficher / generer / shopper / exporter.
+ */
 export const planningsRouter = new Hono<{ Bindings: Bindings }>();
 
 planningsRouter.use('*', requireAuth());
 
 // ============================================================================
-// Helpers de mapping DB row -> shape API
+// Helpers de mapping
 // ============================================================================
 
 type MealPlanRow = {
@@ -38,21 +43,9 @@ type MealPlanRow = {
   updated_at: string;
 };
 
-type PlanningRow = {
-  id: string;
-  household_id: string;
-  meal_plan_id: string | null;
-  name: string;
-  start_date: string;
-  end_date: string;
-  status: 'draft' | 'active' | 'archived';
-  created_at: string;
-  updated_at: string;
-};
-
 type PlannedMealRow = {
   id: string;
-  planning_id: string;
+  household_id: string;
   date: string;
   slot_key: string;
   recipe_id: string | null;
@@ -80,24 +73,10 @@ function mapMealPlan(row: MealPlanRow): MealPlan {
   };
 }
 
-function mapPlanning(row: PlanningRow): Planning {
-  return {
-    id: row.id,
-    householdId: row.household_id,
-    mealPlanId: row.meal_plan_id,
-    name: row.name,
-    startDate: row.start_date,
-    endDate: row.end_date,
-    status: row.status,
-    createdAt: toIsoString(row.created_at),
-    updatedAt: toIsoString(row.updated_at),
-  };
-}
-
 function mapPlannedMeal(row: PlannedMealRow): PlannedMeal {
   return {
     id: row.id,
-    planningId: row.planning_id,
+    householdId: row.household_id,
     date: row.date,
     slotKey: row.slot_key,
     recipeId: row.recipe_id,
@@ -112,7 +91,21 @@ function mapPlannedMeal(row: PlannedMealRow): PlannedMeal {
 }
 
 // ============================================================================
-// Plan-type
+// Validation des query strings ?from=YYYY-MM-DD&to=YYYY-MM-DD
+// ============================================================================
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function parseRange(c: { req: { query: (k: string) => string | undefined } }) {
+  const from = c.req.query('from');
+  const to = c.req.query('to');
+  if (!from || !to || !DATE_RE.test(from) || !DATE_RE.test(to)) {
+    return { error: 'invalid_range' as const };
+  }
+  if (to < from) return { error: 'invalid_range' as const };
+  return { from, to };
+}
+
+// ============================================================================
+// Plan-type (inchange par la refonte calendrier)
 // ============================================================================
 
 planningsRouter.get('/households/:householdId/meal-plan', async (c) => {
@@ -175,113 +168,70 @@ planningsRouter.put('/meal-plan', async (c) => {
 });
 
 // ============================================================================
-// Plannings
+// GET /api/households/:hid/meals?from=&to=
+//
+// Retourne tous les meals du foyer dans la fenetre [from, to] inclusive.
 // ============================================================================
-
-planningsRouter.get('/households/:householdId/plannings', async (c) => {
+planningsRouter.get('/households/:householdId/meals', async (c) => {
   const auth = getAuth(c);
   const householdId = c.req.param('householdId');
   if (!householdId) return c.json({ error: 'missing_household_id' }, 400);
 
+  const range = parseRange(c);
+  if ('error' in range) return c.json({ error: range.error }, 400);
+
   const sb = getUserClient(c.env, auth.accessToken);
   const { data, error } = await sb
-    .from('plannings')
-    .select('*')
-    .eq('household_id', householdId)
-    .order('start_date', { ascending: false });
-
-  if (error) {
-    console.error('[planning] list failed', error);
-    return c.json({ error: 'db_error', message: error.message }, 500);
-  }
-  return c.json({
-    items: (data as unknown as PlanningRow[]).map(mapPlanning),
-  });
-});
-
-planningsRouter.get('/plannings/:id', async (c) => {
-  const auth = getAuth(c);
-  const id = c.req.param('id');
-  if (!id) return c.json({ error: 'missing_id' }, 400);
-
-  const sb = getUserClient(c.env, auth.accessToken);
-  const { data: planningRow, error: pErr } = await sb
-    .from('plannings')
-    .select('*')
-    .eq('id', id)
-    .maybeSingle();
-  if (pErr) {
-    console.error('[planning] get failed', pErr);
-    return c.json({ error: 'db_error', message: pErr.message }, 500);
-  }
-  if (!planningRow) return c.json({ error: 'not_found' }, 404);
-
-  const { data: mealRows, error: mErr } = await sb
     .from('planned_meals')
     .select('*')
-    .eq('planning_id', id)
+    .eq('household_id', householdId)
+    .gte('date', range.from)
+    .lte('date', range.to)
     .order('date', { ascending: true })
     .order('position', { ascending: true });
-  if (mErr) {
-    console.error('[planning] meals fetch failed', mErr);
-    return c.json({ error: 'db_error', message: mErr.message }, 500);
+
+  if (error) {
+    console.error('[planning] meals fetch failed', error);
+    return c.json({ error: 'db_error', message: error.message }, 500);
   }
 
-  const planning = mapPlanning(planningRow as unknown as PlanningRow);
-  const meals = (mealRows as unknown as PlannedMealRow[]).map(mapPlannedMeal);
-  const payload: PlanningWithMeals = { ...planning, meals };
+  const meals = (data as unknown as PlannedMealRow[]).map(mapPlannedMeal);
+  const payload: MealsRange = {
+    householdId,
+    dateFrom: range.from,
+    dateTo: range.to,
+    meals,
+  };
   return c.json(payload);
 });
 
-planningsRouter.post('/plannings', async (c) => {
+// ============================================================================
+// PUT /api/households/:hid/meals  (body: SetMealsRangeInput)
+//
+// Replace tous les meals du foyer dans [dateFrom, dateTo] par la liste fournie
+// (en preservant les locked si keepLocked=true).
+// ============================================================================
+planningsRouter.put('/households/:householdId/meals', async (c) => {
   const auth = getAuth(c);
+  const householdId = c.req.param('householdId');
+  if (!householdId) return c.json({ error: 'missing_household_id' }, 400);
+
   let body: unknown;
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: 'invalid_json' }, 400);
   }
-  const parsed = CreatePlanningInputSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: 'validation', issues: parsed.error.issues }, 400);
-  }
-  const input = parsed.data;
-  const sb = getUserClient(c.env, auth.accessToken);
-
-  const { data, error } = await sb.rpc('create_planning', {
-    p_household_id: input.householdId,
-    p_start_date: input.startDate,
-    p_end_date: input.endDate,
-    p_meal_plan_id: input.mealPlanId ?? null,
-    p_name: input.name ?? null,
-  });
-
-  if (error) {
-    console.error('[planning] create_planning RPC failed', error);
-    if (error.code === '42501') return c.json({ error: 'forbidden' }, 403);
-    return c.json({ error: 'db_error', message: error.message }, 500);
-  }
-  return c.json(mapPlanning(data as unknown as PlanningRow), 201);
-});
-
-planningsRouter.put('/plannings/:id/meals', async (c) => {
-  const auth = getAuth(c);
-  const id = c.req.param('id');
-  if (!id) return c.json({ error: 'missing_id' }, 400);
-  let body: unknown;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: 'invalid_json' }, 400);
-  }
-  const parsed = SetPlanningMealsInputSchema.safeParse(body);
+  const parsed = SetMealsRangeInputSchema.safeParse(body);
   if (!parsed.success) {
     return c.json({ error: 'validation', issues: parsed.error.issues }, 400);
   }
 
   const sb = getUserClient(c.env, auth.accessToken);
-  const { data, error } = await sb.rpc('set_planning_meals', {
-    p_planning_id: id,
+  const { data, error } = await sb.rpc('set_meals_for_range', {
+    p_household_id: householdId,
+    p_date_from: parsed.data.dateFrom,
+    p_date_to: parsed.data.dateTo,
     p_meals: parsed.data.meals.map((m) => ({
       date: m.date,
       slotKey: m.slotKey,
@@ -298,18 +248,30 @@ planningsRouter.put('/plannings/:id/meals', async (c) => {
   });
 
   if (error) {
-    console.error('[planning] set_planning_meals RPC failed', error);
+    console.error('[planning] set_meals_for_range RPC failed', error);
     if (error.code === '42501') return c.json({ error: 'forbidden' }, 403);
-    if (error.code === 'P0002') return c.json({ error: 'not_found' }, 404);
+    if (error.code === '22023')
+      return c.json({ error: 'invalid_range', message: error.message }, 400);
     return c.json({ error: 'db_error', message: error.message }, 500);
   }
-  const result = data as unknown as { planning: PlanningRow; meals: PlannedMealRow[] };
-  const planning = mapPlanning(result.planning);
-  const meals = (result.meals ?? []).map(mapPlannedMeal);
-  const payload: PlanningWithMeals = { ...planning, meals };
+  const result = data as unknown as {
+    householdId: string;
+    dateFrom: string;
+    dateTo: string;
+    meals: PlannedMealRow[];
+  };
+  const payload: MealsRange = {
+    householdId: result.householdId,
+    dateFrom: result.dateFrom,
+    dateTo: result.dateTo,
+    meals: (result.meals ?? []).map(mapPlannedMeal),
+  };
   return c.json(payload);
 });
 
+// ============================================================================
+// PATCH /api/planned-meals/:id   (edit unitaire)
+// ============================================================================
 planningsRouter.patch('/planned-meals/:id', async (c) => {
   const auth = getAuth(c);
   const id = c.req.param('id');
@@ -349,16 +311,19 @@ planningsRouter.patch('/planned-meals/:id', async (c) => {
   return c.json(mapPlannedMeal(data as unknown as PlannedMealRow));
 });
 
-planningsRouter.delete('/plannings/:id', async (c) => {
+// ============================================================================
+// DELETE /api/planned-meals/:id  (suppression unitaire)
+// ============================================================================
+planningsRouter.delete('/planned-meals/:id', async (c) => {
   const auth = getAuth(c);
   const id = c.req.param('id');
   if (!id) return c.json({ error: 'missing_id' }, 400);
 
   const sb = getUserClient(c.env, auth.accessToken);
-  const { error } = await sb.rpc('delete_planning', { p_planning_id: id });
+  const { error } = await sb.rpc('delete_planned_meal', { p_meal_id: id });
 
   if (error) {
-    console.error('[planning] delete_planning RPC failed', error);
+    console.error('[planning] delete_planned_meal RPC failed', error);
     if (error.code === '42501') return c.json({ error: 'forbidden' }, 403);
     if (error.code === 'P0002') return c.json({ error: 'not_found' }, 404);
     return c.json({ error: 'db_error', message: error.message }, 500);
@@ -367,41 +332,48 @@ planningsRouter.delete('/plannings/:id', async (c) => {
 });
 
 // ============================================================================
-// Liste de courses : agregation des recipe_ingredients pour le planning
+// Liste de courses : agregation des recipe_ingredients sur une fenetre
+// GET /api/households/:hid/shopping-list?from=&to=
 // ============================================================================
-planningsRouter.get('/plannings/:id/shopping-list', async (c) => {
+planningsRouter.get('/households/:householdId/shopping-list', async (c) => {
   const auth = getAuth(c);
-  const id = c.req.param('id');
-  if (!id) return c.json({ error: 'missing_id' }, 400);
+  const householdId = c.req.param('householdId');
+  if (!householdId) return c.json({ error: 'missing_household_id' }, 400);
+
+  const range = parseRange(c);
+  if ('error' in range) return c.json({ error: range.error }, 400);
 
   const sb = getUserClient(c.env, auth.accessToken);
 
-  // 1. recupere les meals du planning
+  // 1. recupere les meals du foyer dans la fenetre
   const { data: meals, error: mErr } = await sb
     .from('planned_meals')
     .select('recipe_id, servings')
-    .eq('planning_id', id)
+    .eq('household_id', householdId)
+    .gte('date', range.from)
+    .lte('date', range.to)
     .not('recipe_id', 'is', null);
   if (mErr) {
     console.error('[shopping] meals fetch failed', mErr);
     return c.json({ error: 'db_error', message: mErr.message }, 500);
   }
 
-  // Note : `servings` est la quantite reelle a produire pour ce repas.
-  // `covers_meals` indique combien de repas le plat couvre, mais on n'en
-  // tient PAS compte ici : le user a deja choisi le bon `servings` (ex 8
-  // = 4 pers x 2 repas couverts).
   type MealMini = { recipe_id: string; servings: number };
   const mealsList = (meals ?? []) as unknown as MealMini[];
 
   if (mealsList.length === 0) {
-    const empty: ShoppingListResponse = { planningId: id, items: [] };
+    const empty: ShoppingListResponse = {
+      householdId,
+      dateFrom: range.from,
+      dateTo: range.to,
+      items: [],
+    };
     return c.json(empty);
   }
 
   const recipeIds = [...new Set(mealsList.map((m) => m.recipe_id))];
 
-  // 2. recupere les recipes (pour avoir leur servings de reference)
+  // 2. recipes (servings de reference)
   const { data: recipes, error: rErr } = await sb
     .from('recipes')
     .select('id, servings')
@@ -415,7 +387,7 @@ planningsRouter.get('/plannings/:id/shopping-list', async (c) => {
     (recipes as unknown as RecipeMini[]).map((r) => [r.id, r.servings]),
   );
 
-  // 3. recupere tous les ingredients lies a ces recipes
+  // 3. ingredients
   const { data: ings, error: iErr } = await sb
     .from('recipe_ingredients')
     .select('recipe_id, ingredient_name, quantity, unit')
@@ -431,8 +403,7 @@ planningsRouter.get('/plannings/:id/shopping-list', async (c) => {
     unit: string | null;
   };
 
-  // 4. agrege par (name normalise, unit) en multipliant par le ratio
-  //    (mealServings / recipeServings) pour chaque occurence du meal
+  // 4. agrege par (name normalise, unit) avec ratio servings
   type Key = string;
   const norm = (s: string) => s.trim().toLowerCase();
   const keyFor = (name: string, unit: string | null) => `${norm(name)}|${unit ?? ''}`;
@@ -448,7 +419,6 @@ planningsRouter.get('/plannings/:id/shopping-list', async (c) => {
 
   for (const ing of (ings ?? []) as unknown as IngMini[]) {
     const baseServings = recipeServings.get(ing.recipe_id) ?? 1;
-    // total quantity for this ingredient = sum over each meal that uses recipe_id
     const mealsForRecipe = mealsList.filter((m) => m.recipe_id === ing.recipe_id);
     const k = keyFor(ing.ingredient_name, ing.unit);
     const existing = acc.get(k) ?? {
@@ -480,33 +450,44 @@ planningsRouter.get('/plannings/:id/shopping-list', async (c) => {
     }))
     .sort((a, b) => a.ingredientName.localeCompare(b.ingredientName));
 
-  const payload: ShoppingListResponse = { planningId: id, items };
+  const payload: ShoppingListResponse = {
+    householdId,
+    dateFrom: range.from,
+    dateTo: range.to,
+    items,
+  };
   return c.json(payload);
 });
 
 // ============================================================================
-// GET /api/plannings/:id/ics : exporte le planning au format iCalendar
+// GET /api/households/:hid/ics?from=&to=
+// Exporte les meals de la fenetre au format iCalendar.
 // ============================================================================
-planningsRouter.get('/plannings/:id/ics', async (c) => {
+planningsRouter.get('/households/:householdId/ics', async (c) => {
   const auth = getAuth(c);
-  const id = c.req.param('id');
-  if (!id) return c.json({ error: 'missing_id' }, 400);
+  const householdId = c.req.param('householdId');
+  if (!householdId) return c.json({ error: 'missing_household_id' }, 400);
+
+  const range = parseRange(c);
+  if ('error' in range) return c.json({ error: range.error }, 400);
 
   const sb = getUserClient(c.env, auth.accessToken);
 
-  const { data: planning, error: pErr } = await sb
-    .from('plannings')
-    .select('id, name, household_id')
-    .eq('id', id)
+  const { data: household, error: hErr } = await sb
+    .from('households')
+    .select('id, name')
+    .eq('id', householdId)
     .maybeSingle();
-  if (pErr || !planning) {
+  if (hErr || !household) {
     return c.json({ error: 'not_found' }, 404);
   }
 
   const { data: meals, error: mErr } = await sb
     .from('planned_meals')
     .select('id, date, slot_key, recipe_id, custom_title')
-    .eq('planning_id', id)
+    .eq('household_id', householdId)
+    .gte('date', range.from)
+    .lte('date', range.to)
     .order('date', { ascending: true })
     .order('position', { ascending: true });
   if (mErr) {
@@ -546,7 +527,7 @@ planningsRouter.get('/plannings/:id/ics', async (c) => {
     .filter((e) => e.title.trim().length > 0);
 
   const ics = buildIcs({
-    calendarName: `Mealendar - ${(planning as { name: string }).name}`,
+    calendarName: `Mealendar - ${(household as { name: string }).name}`,
     events,
   });
 
@@ -554,7 +535,7 @@ planningsRouter.get('/plannings/:id/ics', async (c) => {
     status: 200,
     headers: {
       'Content-Type': 'text/calendar; charset=utf-8',
-      'Content-Disposition': `attachment; filename="planning-${id}.ics"`,
+      'Content-Disposition': `attachment; filename="mealendar-${range.from}_${range.to}.ics"`,
     },
   });
 });

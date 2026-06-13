@@ -2,16 +2,27 @@ import { DietComponentChips } from '@/components/DietComponentChips';
 import { GenerateRecipeModal } from '@/components/GenerateRecipeModal';
 import { useHouseholdDetail } from '@/hooks/useHouseholds';
 import {
-  useDeletePlanning,
+  useCreateMealPlanRange,
+  useDeleteMealPlanRange,
+  useDeletePlannedMeal,
+  useDuplicateMealsRange,
   useGeneratePlanningWithLlm,
   useMealPlan,
-  usePlanning,
-  useSetPlanningMeals,
+  useMealPlanRanges,
+  useMealsRange,
+  useSetMealsRange,
   useUpdatePlannedMeal,
 } from '@/hooks/usePlannings';
 import { useRecipes } from '@/hooks/useRecipes';
-import { ApiError, fetchPlanningIcs } from '@/lib/api';
-import { WEEKDAY_LABELS, addDays, fromIsoDate, rangeDates, weekdayOf } from '@/lib/dates';
+import { ApiError, fetchHouseholdIcs } from '@/lib/api';
+import {
+  WEEKDAY_LABELS,
+  addDays,
+  formatShortDate,
+  fromIsoDate,
+  rangeDates,
+  weekdayOf,
+} from '@/lib/dates';
 import { haptics } from '@/lib/haptics';
 import { generatePlanningMeals } from '@/lib/planningGenerator';
 import { useActiveHousehold } from '@/stores/activeHousehold';
@@ -24,14 +35,16 @@ import {
 import * as FileSystem from 'expo-file-system';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as Sharing from 'expo-sharing';
-import { useLayoutEffect, useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Button,
   Chip,
   Dialog,
+  Divider,
   IconButton,
+  Menu,
   Portal,
   Surface,
   Text,
@@ -47,119 +60,152 @@ const SLOT_LABELS: Record<string, string> = {
   dinner: 'Diner',
 };
 
-export default function PlanningDetailScreen() {
+/**
+ * Ecran "plage de jours" : affiche les slots configures pour chaque jour
+ * de la plage [from, to], avec edition par slot (picker recette, locked,
+ * coversMeals, diners, suppression). Boutons d'actions globaux en haut :
+ * Aleatoire / IA / Effacer / Liste de courses / ICS.
+ *
+ * Reprend la logique de day/[date].tsx mais en boucle sur N jours.
+ *
+ * On charge une fenetre etendue [from-2, to+1] pour gerer les coversMeals
+ * qui pourraient deborder dans l'affichage des slots couverts.
+ */
+export default function PlanningRangeScreen() {
   const theme = useTheme();
   const navigation = useNavigation();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { from, to } = useLocalSearchParams<{ from: string; to: string }>();
   const householdId = useActiveHousehold((s) => s.householdId);
 
-  const planning = usePlanning(id);
+  const fromDate = from ?? '';
+  const toDate = to ?? '';
+
+  // Fenetre etendue : recule de 2 jours pour les coversMeals qui couvrent le repas courant.
+  const windowFrom = useMemo(() => (fromDate ? addDays(fromDate, -2) : ''), [fromDate]);
+  const windowTo = useMemo(() => (toDate ? addDays(toDate, 1) : ''), [toDate]);
+
+  const meals = useMealsRange(householdId, windowFrom, windowTo);
   const mealPlan = useMealPlan(householdId);
   const recipes = useRecipes(householdId);
   const household = useHouseholdDetail(householdId);
-  const setMeals = useSetPlanningMeals(id ?? '');
-  const updateMeal = useUpdatePlannedMeal(id ?? '');
-  const deletePlanning = useDeletePlanning();
-  const generateLlm = useGeneratePlanningWithLlm(id ?? '');
+  const setMeals = useSetMealsRange(householdId ?? '');
+  const updateMeal = useUpdatePlannedMeal(householdId ?? '');
+  const deleteMeal = useDeletePlannedMeal(householdId ?? '');
+  const generateLlm = useGeneratePlanningWithLlm(householdId ?? '');
+  const duplicateRange = useDuplicateMealsRange(householdId ?? '');
+  const allRanges = useMealPlanRanges(householdId);
+  const deleteRange = useDeleteMealPlanRange(householdId ?? '');
+  const createRange = useCreateMealPlanRange();
 
-  /** nb membres actifs du foyer (fallback 4 si pas encore charge) */
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [fillOpen, setFillOpen] = useState(false);
+
   const memberCount = Math.max(1, household.data?.members.length ?? 4);
 
-  const [recipePickerOpen, setRecipePickerOpen] = useState(false);
-  const [pickerTarget, setPickerTarget] = useState<{
-    date: string;
-    slotKey: string;
-  } | null>(null);
-  /** valeur courante du stepper coversMeals dans le picker (1..3) */
-  const [pickerCoversMeals, setPickerCoversMeals] = useState<number>(1);
-  /**
-   * Set des user_id concernes par le repas. Vide = tous les membres
-   * (comportement par defaut pour ne pas casser l'existant).
-   */
-  const [pickerDiners, setPickerDiners] = useState<string[]>([]);
+  const dates = useMemo(
+    () => (fromDate && toDate ? rangeDates(fromDate, toDate) : []),
+    [fromDate, toDate],
+  );
+  const dayCount = dates.length;
 
-  // Generation IA contextuelle pour un slot du planning
+  const [recipePickerOpen, setRecipePickerOpen] = useState(false);
+  const [pickerTarget, setPickerTarget] = useState<{ date: string; slotKey: string } | null>(null);
+  const [pickerCoversMeals, setPickerCoversMeals] = useState<number>(1);
+  const [pickerDiners, setPickerDiners] = useState<string[]>([]);
   const [iaContext, setIaContext] = useState<{
     date: string;
     slotKey: string;
     components: DietComponent[];
   } | null>(null);
 
+  // Ref vers les dernieres actions/etats, pour que le Menu du header appelle
+  // toujours des closures fraiches sans avoir a recreer le headerRight.
+  const headerActionsRef = useRef<{
+    onDuplicate: () => void;
+    onClear: () => void;
+    onDelete: () => void;
+    busy: boolean;
+  }>({ onDuplicate: () => {}, onClear: () => {}, onDelete: () => {}, busy: false });
+
   useLayoutEffect(() => {
-    if (!planning.data) return;
+    if (!fromDate || !toDate) return;
+    const fromLabel = formatShortDate(fromDate);
+    const toLabel = formatShortDate(toDate);
+    const title = fromDate === toDate ? fromLabel : `${fromLabel} → ${toLabel} (${dayCount}j)`;
     navigation.setOptions({
-      title: planning.data.name,
+      title,
       headerRight: () => (
-        <View style={{ flexDirection: 'row' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <IconButton
             icon="cart-outline"
             size={20}
-            onPress={() => router.push(`/(app)/(tabs)/planning/${id}/shopping`)}
+            onPress={() =>
+              router.push({
+                pathname: '/(app)/(tabs)/planning/shopping',
+                params: { from: fromDate, to: toDate },
+              })
+            }
           />
           <IconButton icon="calendar-export" size={20} onPress={() => onExportIcs()} />
-          <IconButton
-            icon="trash-can-outline"
-            iconColor={theme.colors.error}
-            size={20}
-            onPress={() => {
-              Alert.alert('Supprimer le planning', 'Cette action est irreversible.', [
-                { text: 'Annuler', style: 'cancel' },
-                {
-                  text: 'Supprimer',
-                  style: 'destructive',
-                  onPress: async () => {
-                    if (!planning.data) return;
-                    try {
-                      await deletePlanning.mutateAsync({
-                        id: planning.data.id,
-                        householdId: planning.data.householdId,
-                      });
-                      router.replace('/(app)/(tabs)/planning');
-                    } catch (e) {
-                      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-                    }
-                  },
-                },
-              ]);
-            }}
-          />
+          <Menu
+            visible={menuOpen}
+            onDismiss={() => setMenuOpen(false)}
+            anchor={<IconButton icon="dots-vertical" size={20} onPress={() => setMenuOpen(true)} />}
+          >
+            <Menu.Item
+              leadingIcon="content-duplicate"
+              title="Dupliquer cette plage"
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onDuplicate();
+              }}
+            />
+            <Menu.Item
+              leadingIcon="delete-sweep-outline"
+              title="Effacer les repas"
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onClear();
+              }}
+            />
+            <Divider />
+            <Menu.Item
+              leadingIcon="trash-can-outline"
+              title="Supprimer la plage"
+              titleStyle={{ color: theme.colors.error }}
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onDelete();
+              }}
+            />
+          </Menu>
         </View>
       ),
     });
-  }, [navigation, planning.data, id, theme.colors.error, deletePlanning]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigation, fromDate, toDate, dayCount, menuOpen, theme.colors.error]);
 
-  const dates = useMemo(
-    () => (planning.data ? rangeDates(planning.data.startDate, planning.data.endDate) : []),
-    [planning.data],
-  );
+  const allMeals = meals.data?.meals ?? [];
 
   const mealsByDateSlot = useMemo(() => {
     const map = new Map<string, PlannedMeal[]>();
-    if (!planning.data) return map;
-    for (const m of planning.data.meals) {
+    for (const m of allMeals) {
       const k = `${m.date}|${m.slotKey}`;
       const arr = map.get(k) ?? [];
       arr.push(m);
       map.set(k, arr);
     }
     return map;
-  }, [planning.data]);
+  }, [allMeals]);
 
-  /**
-   * Map des slots qui sont COUVERTS par un meal multi-meals pose plus tot.
-   * Cle = `${date}|${slotKey}`, valeur = meal source.
-   *
-   * Ex : meal du 2026-01-02 dinner avec coversMeals=2
-   *  -> coveredByMap['2026-01-03|lunch'] = ce meal (le prochain repas
-   *     principal apres le dinner du 02).
-   *
-   * Logique implementee dans findCoveredSlots() de @mealendar/shared :
-   * saute breakfast / snack qui ne sont pas des "repas principaux".
-   */
   const coveredByMap = useMemo(() => {
     const map = new Map<string, PlannedMeal>();
-    if (!planning.data || !mealPlan.data) return map;
-    for (const m of planning.data.meals) {
+    if (!mealPlan.data) return map;
+    for (const m of allMeals) {
       const cm = m.coversMeals ?? 1;
       if (cm <= 1) continue;
       const covered = findCoveredSlots({
@@ -173,7 +219,7 @@ export default function PlanningDetailScreen() {
       }
     }
     return map;
-  }, [planning.data, mealPlan.data]);
+  }, [allMeals, mealPlan.data]);
 
   const recipesById = useMemo(() => {
     const map = new Map<string, RecipeListItem>();
@@ -181,39 +227,79 @@ export default function PlanningDetailScreen() {
     return map;
   }, [recipes.data]);
 
-  const onGenerate = async () => {
-    if (!planning.data || !mealPlan.data) {
-      Alert.alert(
-        'Plan-type requis',
-        "Configurez d'abord votre plan-type pour generer un planning.",
-        [
-          { text: 'Plus tard', style: 'cancel' },
-          {
-            text: 'Configurer',
-            onPress: () => router.push('/(app)/(tabs)/planning/meal-plan'),
-          },
-        ],
-      );
+  const slotsForDay = (d: string) => {
+    const wd = weekdayOf(d);
+    const planSlots = mealPlan.data?.slotConfig[wd] ?? [];
+    const slotsFromMeals = allMeals.filter((m) => m.date === d).map((m) => ({ key: m.slotKey }));
+    const seen = new Set<string>();
+    const out: { key: string }[] = [];
+    for (const s of [...planSlots, ...slotsFromMeals]) {
+      if (!seen.has(s.key)) {
+        seen.add(s.key);
+        out.push({ key: s.key });
+      }
+    }
+    return out;
+  };
+
+  // ===========================================================================
+  // Actions globales : Aleatoire / IA / Effacer sur le range
+  // ===========================================================================
+  /**
+   * Assure qu'une plage [from,to] (sans nom) existe pour cette periode. Appelee
+   * apres qu'un repas a ete pose, pour que la plage apparaisse sur le calendrier.
+   * Idempotent : ne cree rien si une plage couvre deja exactement [from,to].
+   */
+  const ensureRange = async () => {
+    if (!householdId) return;
+    const exists = (allRanges.data ?? []).some(
+      (r) => r.dateFrom === fromDate && r.dateTo === toDate,
+    );
+    if (exists) return;
+    try {
+      await createRange.mutateAsync({
+        householdId,
+        name: '',
+        dateFrom: fromDate,
+        dateTo: toDate,
+      });
+    } catch {
+      // Non bloquant : si la creation de plage echoue, le repas est quand meme pose.
+    }
+  };
+
+  const onGenerateRandom = async () => {
+    if (!householdId || !mealPlan.data) {
+      Alert.alert('Plan-type requis', "Configurez d'abord votre plan-type.", [
+        { text: 'Plus tard', style: 'cancel' },
+        {
+          text: 'Configurer',
+          onPress: () => router.push('/(app)/(tabs)/planning/meal-plan'),
+        },
+      ]);
       return;
     }
     if ((recipes.data?.items.length ?? 0) === 0) {
-      Alert.alert(
-        'Aucune recette',
-        'Ajoutez au moins quelques recettes a votre bibliotheque pour pouvoir generer un planning.',
-      );
+      Alert.alert('Aucune recette', 'Ajoutez au moins quelques recettes pour pouvoir generer.');
       return;
     }
     const generated = generatePlanningMeals({
-      startDate: planning.data.startDate,
-      endDate: planning.data.endDate,
+      startDate: fromDate,
+      endDate: toDate,
       slotConfig: mealPlan.data.slotConfig,
       recipes: recipes.data?.items ?? [],
-      existingMeals: planning.data.meals,
+      existingMeals: allMeals.filter((m) => m.date >= fromDate && m.date <= toDate),
       varietyRules: mealPlan.data.varietyRules,
       defaultServings: memberCount,
     });
     try {
-      await setMeals.mutateAsync({ meals: generated, keepLocked: true });
+      await setMeals.mutateAsync({
+        dateFrom: fromDate,
+        dateTo: toDate,
+        meals: generated,
+        keepLocked: true,
+      });
+      await ensureRange();
       haptics.success();
     } catch (e) {
       haptics.error();
@@ -221,44 +307,18 @@ export default function PlanningDetailScreen() {
     }
   };
 
-  const onClear = async () => {
-    if (!planning.data) return;
-    Alert.alert('Tout effacer', 'Supprime tous les repas (sauf ceux verrouilles).', [
-      { text: 'Annuler', style: 'cancel' },
-      {
-        text: 'Effacer',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await setMeals.mutateAsync({ meals: [], keepLocked: true });
-          } catch (e) {
-            Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-          }
-        },
-      },
-    ]);
-  };
-
-  /**
-   * Generation IA full-planning : un seul appel LLM remplit toute la semaine
-   * en piochant parmi les recettes existantes du foyer.
-   * Consomme 1 unite de quota LLM (idem creation d'1 recette IA).
-   */
   const onGenerateLlm = async () => {
-    if (!planning.data || !mealPlan.data) {
+    if (!householdId || !mealPlan.data) {
       Alert.alert('Plan-type requis', "Configurez d'abord votre plan-type.");
       return;
     }
     if ((recipes.data?.items.length ?? 0) === 0) {
-      Alert.alert(
-        'Aucune recette',
-        "Ajoutez au moins quelques recettes a votre bibliotheque avant de demander a l'IA de planifier.",
-      );
+      Alert.alert('Aucune recette', 'Ajoutez au moins quelques recettes a votre bibliotheque.');
       return;
     }
     Alert.alert(
       "Generer avec l'IA ?",
-      "L'IA choisira les recettes les plus adaptees a vos contraintes (plan alimentaire, variete, slots). Consomme 1 unite de quota LLM.",
+      `L'IA va planifier ${dayCount} jour${dayCount > 1 ? 's' : ''}. Consomme 1 unite de quota LLM.`,
       [
         { text: 'Annuler', style: 'cancel' },
         {
@@ -266,16 +326,19 @@ export default function PlanningDetailScreen() {
           onPress: async () => {
             try {
               const res = await generateLlm.mutateAsync({
-                planningId: planning.data?.id ?? '',
+                householdId,
+                dateFrom: fromDate,
+                dateTo: toDate,
                 keepLocked: true,
               });
+              await ensureRange();
               haptics.success();
               const skippedTxt =
                 res.skipped > 0
                   ? ` ${res.skipped} slot${res.skipped > 1 ? 's' : ''} non rempli${res.skipped > 1 ? 's' : ''}.`
                   : '';
               Alert.alert(
-                'Planning genere',
+                'Repas generes',
                 `${res.filled} repas planifie${res.filled > 1 ? 's' : ''}.${skippedTxt}`,
               );
             } catch (e) {
@@ -292,155 +355,61 @@ export default function PlanningDetailScreen() {
     );
   };
 
-  const onPickRecipe = async (recipeId: string) => {
-    if (!pickerTarget || !planning.data) return;
-    const existing = mealsByDateSlot.get(`${pickerTarget.date}|${pickerTarget.slotKey}`)?.[0];
-    const coversMeals = Math.min(3, Math.max(1, pickerCoversMeals));
-    // Effective diner count : si tableau vide -> tout le monde
-    const effectiveDinerCount = pickerDiners.length > 0 ? pickerDiners.length : memberCount;
-    const servings = effectiveDinerCount * coversMeals;
-
-    if (existing) {
-      // patch existant
-      try {
-        await updateMeal.mutateAsync({
-          mealId: existing.id,
-          input: {
-            recipeId,
-            customTitle: null,
-            coversMeals,
-            servings,
-            diners: pickerDiners,
-          },
-        });
-      } catch (e) {
-        Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-      }
-    } else {
-      // crée un meal en passant par setPlanningMeals avec keepLocked + ajout
-      const others = planning.data.meals.map((m) => ({
-        date: m.date,
-        slotKey: m.slotKey,
-        recipeId: m.recipeId,
-        customTitle: m.customTitle,
-        servings: m.servings,
-        diners: m.diners,
-        locked: m.locked,
-        notes: m.notes,
-        position: m.position,
-        coversMeals: m.coversMeals,
-      }));
-      try {
-        await setMeals.mutateAsync({
-          keepLocked: false, // on ecrase tout, on a deja les autres dans `others`
-          meals: [
-            ...others,
-            {
-              date: pickerTarget.date,
-              slotKey: pickerTarget.slotKey,
-              recipeId,
-              servings,
-              diners: pickerDiners,
-              locked: false,
-              position: 0,
-              coversMeals,
-            },
-          ],
-        });
-      } catch (e) {
-        Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-      }
-    }
-    setRecipePickerOpen(false);
-    setPickerTarget(null);
-    setPickerCoversMeals(1);
-    setPickerDiners([]);
-  };
-
-  const onRemoveMeal = async (meal: PlannedMeal) => {
-    if (!planning.data) return;
-    const remaining = planning.data.meals
-      .filter((m) => m.id !== meal.id)
-      .map((m) => ({
-        date: m.date,
-        slotKey: m.slotKey,
-        recipeId: m.recipeId,
-        customTitle: m.customTitle,
-        servings: m.servings,
-        diners: m.diners,
-        locked: m.locked,
-        notes: m.notes,
-        position: m.position,
-        coversMeals: m.coversMeals,
-      }));
-    try {
-      await setMeals.mutateAsync({ meals: remaining, keepLocked: false });
-    } catch (e) {
-      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-    }
-  };
-
-  const onToggleLock = async (meal: PlannedMeal) => {
-    haptics.light();
-    try {
-      await updateMeal.mutateAsync({
-        mealId: meal.id,
-        input: { locked: !meal.locked },
-      });
-    } catch (e) {
-      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
-    }
+  const onClearRange = () => {
+    Alert.alert('Tout effacer', 'Supprime tous les repas de cette plage (sauf les verrouilles).', [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Effacer',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await setMeals.mutateAsync({
+              dateFrom: fromDate,
+              dateTo: toDate,
+              meals: [],
+              keepLocked: true,
+            });
+          } catch (e) {
+            Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+          }
+        },
+      },
+    ]);
   };
 
   /**
-   * L'utilisateur a tape sur un slot couvert par un meal multi-meals.
-   * On lui propose soit de detacher (reduire coversMeals du meal source
-   * pour liberer ce slot), soit d'annuler.
+   * Supprime completement cette plage : vide les repas de [from,to] ET supprime
+   * la/les etiquette(s) de plage qui chevauchent la periode. Puis revient.
    */
-  const onPressCoveredSlot = (
-    sourceMeal: PlannedMeal,
-    targetDate: string,
-    targetSlotKey: string,
-  ) => {
-    const sourceWd = WEEKDAY_LABELS[weekdayOf(sourceMeal.date)];
-    const sourceDateLabel = `${String(fromIsoDate(sourceMeal.date).getDate()).padStart(2, '0')}/${String(fromIsoDate(sourceMeal.date).getMonth() + 1).padStart(2, '0')}`;
-
+  const onDeleteRange = () => {
     Alert.alert(
-      'Repas couvert',
-      `Ce creneau est couvert par le repas du ${sourceWd} ${sourceDateLabel}.`,
+      'Supprimer la plage',
+      'Supprime cette plage du calendrier ET tous ses repas (y compris verrouilles). Action irreversible.',
       [
-        { text: 'OK', style: 'cancel' },
+        { text: 'Annuler', style: 'cancel' },
         {
-          text: 'Liberer ce creneau',
+          text: 'Supprimer',
+          style: 'destructive',
           onPress: async () => {
-            if (!mealPlan.data) return;
-            // On calcule l'index (1-based) du target dans les slots couverts
-            // par le meal source. Reduire coversMeals a cet index libere le
-            // target et tous ceux apres.
-            // Ex: source dinner lundi cm=3 couvre lunch mardi (idx 1) et
-            // dinner mardi (idx 2). Si target = dinner mardi -> newCm = 2.
-            const covered = findCoveredSlots({
-              sourceDate: sourceMeal.date,
-              sourceSlotKey: sourceMeal.slotKey,
-              coversMeals: sourceMeal.coversMeals,
-              slotConfig: mealPlan.data.slotConfig,
-            });
-            const targetIdx = covered.findIndex(
-              (c) => c.date === targetDate && c.slotKey === targetSlotKey,
-            );
-            // Si pas trouve (devrait pas arriver) -> fallback coversMeals=1
-            // Sinon : newCm = targetIdx + 1 (car coversMeals = nb total = source(1) + ceux avant le target)
-            const newCoversMeals = targetIdx >= 0 ? targetIdx + 1 : 1;
-            const newServings =
-              sourceMeal.servings > 0 && sourceMeal.coversMeals > 0
-                ? Math.round((sourceMeal.servings / sourceMeal.coversMeals) * newCoversMeals)
-                : sourceMeal.servings;
             try {
-              await updateMeal.mutateAsync({
-                mealId: sourceMeal.id,
-                input: { coversMeals: newCoversMeals, servings: newServings },
+              // 1. Vide les repas de la periode (sans garder les verrouilles).
+              await setMeals.mutateAsync({
+                dateFrom: fromDate,
+                dateTo: toDate,
+                meals: [],
+                keepLocked: false,
               });
+              // 2. Supprime les etiquettes de plage qui chevauchent [from,to].
+              const overlapping = (allRanges.data ?? []).filter(
+                (r) => !(r.dateTo < fromDate || r.dateFrom > toDate),
+              );
+              for (const r of overlapping) {
+                await deleteRange.mutateAsync(r.id);
+              }
+              haptics.success();
+              router.back();
             } catch (e) {
+              haptics.error();
               Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
             }
           },
@@ -449,17 +418,15 @@ export default function PlanningDetailScreen() {
     );
   };
 
-  /**
-   * Exporte le planning en .ics et lance le partage natif.
-   */
   const onExportIcs = async () => {
-    if (!planning.data) return;
+    if (!householdId) return;
     try {
-      const ics = await fetchPlanningIcs(planning.data.id);
-      const file = new FileSystem.File(FileSystem.Paths.cache, `planning-${planning.data.id}.ics`);
-      if (file.exists) {
-        file.delete();
-      }
+      const ics = await fetchHouseholdIcs(householdId, fromDate, toDate);
+      const file = new FileSystem.File(
+        FileSystem.Paths.cache,
+        `mealendar-${fromDate}_${toDate}.ics`,
+      );
+      if (file.exists) file.delete();
       file.create();
       file.write(ics);
       const ok = await Sharing.isAvailableAsync();
@@ -481,14 +448,181 @@ export default function PlanningDetailScreen() {
   };
 
   /**
-   * Au succes d'une generation IA contextuelle, on attache la recette creee au
-   * planned_meal du slot. Si un meal existe deja a cette date+slot, on le patch ;
-   * sinon on l'ajoute via setPlanningMeals avec keepLocked=false (en preservant les autres).
+   * Duplique tous les repas de la plage courante a une date cible. La date
+   * cible devient la nouvelle 'dateFrom' (l'offset est calcule). On cree
+   * aussi une nouvelle plage nommee.
    */
+  const onDuplicate = async (targetStart: string) => {
+    if (!householdId) return;
+    setDuplicateOpen(false);
+    try {
+      const res = await duplicateRange.mutateAsync({
+        householdId,
+        sourceFrom: fromDate,
+        sourceTo: toDate,
+        targetStart,
+        createRangeName: `Plage du ${formatShortDate(targetStart)}`,
+      });
+      haptics.success();
+      Alert.alert(
+        'Plage dupliquee',
+        `${res.inserted} repas ajoute${res.inserted > 1 ? 's' : ''} du ${formatShortDate(res.targetFrom)} au ${formatShortDate(res.targetTo)}.`,
+        [
+          { text: 'Rester ici', style: 'cancel' },
+          {
+            text: 'Voir la copie',
+            onPress: () => {
+              router.replace(`/(app)/(tabs)/planning/range/${res.targetFrom}/${res.targetTo}`);
+            },
+          },
+        ],
+      );
+    } catch (e) {
+      haptics.error();
+      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+    }
+  };
+
+  // ===========================================================================
+  // Actions sur 1 slot (picker, lock, suppression, IA contextuelle)
+  // ===========================================================================
+  const onPickRecipe = async (recipeId: string) => {
+    if (!pickerTarget || !householdId) return;
+    const targetDate = pickerTarget.date;
+    const existing = mealsByDateSlot.get(`${targetDate}|${pickerTarget.slotKey}`)?.[0];
+    const coversMeals = Math.min(3, Math.max(1, pickerCoversMeals));
+    const effectiveDinerCount = pickerDiners.length > 0 ? pickerDiners.length : memberCount;
+    const servings = effectiveDinerCount * coversMeals;
+
+    if (existing) {
+      try {
+        await updateMeal.mutateAsync({
+          mealId: existing.id,
+          input: {
+            recipeId,
+            customTitle: null,
+            coversMeals,
+            servings,
+            diners: pickerDiners,
+          },
+        });
+      } catch (e) {
+        Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+      }
+    } else {
+      const dayMeals = allMeals
+        .filter((m) => m.date === targetDate)
+        .map((m) => ({
+          date: m.date,
+          slotKey: m.slotKey,
+          recipeId: m.recipeId,
+          customTitle: m.customTitle,
+          servings: m.servings,
+          diners: m.diners,
+          locked: m.locked,
+          notes: m.notes,
+          position: m.position,
+          coversMeals: m.coversMeals,
+        }));
+      try {
+        await setMeals.mutateAsync({
+          dateFrom: targetDate,
+          dateTo: targetDate,
+          keepLocked: false,
+          meals: [
+            ...dayMeals,
+            {
+              date: targetDate,
+              slotKey: pickerTarget.slotKey,
+              recipeId,
+              servings,
+              diners: pickerDiners,
+              locked: false,
+              position: 0,
+              coversMeals,
+            },
+          ],
+        });
+      } catch (e) {
+        Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+      }
+    }
+    await ensureRange();
+    setRecipePickerOpen(false);
+    setPickerTarget(null);
+    setPickerCoversMeals(1);
+    setPickerDiners([]);
+  };
+
+  const onRemoveMeal = async (meal: PlannedMeal) => {
+    try {
+      await deleteMeal.mutateAsync(meal.id);
+    } catch (e) {
+      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+    }
+  };
+
+  const onToggleLock = async (meal: PlannedMeal) => {
+    haptics.light();
+    try {
+      await updateMeal.mutateAsync({
+        mealId: meal.id,
+        input: { locked: !meal.locked },
+      });
+    } catch (e) {
+      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+    }
+  };
+
+  const onPressCoveredSlot = (
+    sourceMeal: PlannedMeal,
+    targetDate: string,
+    targetSlotKey: string,
+  ) => {
+    const sourceWd = WEEKDAY_LABELS[weekdayOf(sourceMeal.date)];
+    const sourceDateLabel = formatShortDate(sourceMeal.date);
+
+    Alert.alert(
+      'Repas couvert',
+      `Ce creneau est couvert par le repas du ${sourceWd} ${sourceDateLabel}.`,
+      [
+        { text: 'OK', style: 'cancel' },
+        {
+          text: 'Liberer ce creneau',
+          onPress: async () => {
+            if (!mealPlan.data) return;
+            const covered = findCoveredSlots({
+              sourceDate: sourceMeal.date,
+              sourceSlotKey: sourceMeal.slotKey,
+              coversMeals: sourceMeal.coversMeals,
+              slotConfig: mealPlan.data.slotConfig,
+            });
+            const targetIdx = covered.findIndex(
+              (c) => c.date === targetDate && c.slotKey === targetSlotKey,
+            );
+            const newCoversMeals = targetIdx >= 0 ? targetIdx + 1 : 1;
+            const newServings =
+              sourceMeal.servings > 0 && sourceMeal.coversMeals > 0
+                ? Math.round((sourceMeal.servings / sourceMeal.coversMeals) * newCoversMeals)
+                : sourceMeal.servings;
+            try {
+              await updateMeal.mutateAsync({
+                mealId: sourceMeal.id,
+                input: { coversMeals: newCoversMeals, servings: newServings },
+              });
+            } catch (e) {
+              Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const onIaSuccess = async (recipeId: string | null) => {
     const ctx = iaContext;
     setIaContext(null);
-    if (!recipeId || !ctx || !planning.data) return;
+    if (!recipeId || !ctx) return;
 
     const existing = mealsByDateSlot.get(`${ctx.date}|${ctx.slotKey}`)?.[0];
     if (existing) {
@@ -497,29 +631,33 @@ export default function PlanningDetailScreen() {
           mealId: existing.id,
           input: { recipeId, customTitle: null },
         });
+        await ensureRange();
       } catch (e) {
         Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
       }
       return;
     }
-
-    const others = planning.data.meals.map((m) => ({
-      date: m.date,
-      slotKey: m.slotKey,
-      recipeId: m.recipeId,
-      customTitle: m.customTitle,
-      servings: m.servings,
-      diners: m.diners,
-      locked: m.locked,
-      notes: m.notes,
-      position: m.position,
-      coversMeals: m.coversMeals,
-    }));
+    const dayMeals = allMeals
+      .filter((m) => m.date === ctx.date)
+      .map((m) => ({
+        date: m.date,
+        slotKey: m.slotKey,
+        recipeId: m.recipeId,
+        customTitle: m.customTitle,
+        servings: m.servings,
+        diners: m.diners,
+        locked: m.locked,
+        notes: m.notes,
+        position: m.position,
+        coversMeals: m.coversMeals,
+      }));
     try {
       await setMeals.mutateAsync({
+        dateFrom: ctx.date,
+        dateTo: ctx.date,
         keepLocked: false,
         meals: [
-          ...others,
+          ...dayMeals,
           {
             date: ctx.date,
             slotKey: ctx.slotKey,
@@ -532,50 +670,49 @@ export default function PlanningDetailScreen() {
           },
         ],
       });
+      await ensureRange();
     } catch (e) {
       Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
     }
   };
 
-  if (planning.isPending) {
+  // ===========================================================================
+  // Render
+  // ===========================================================================
+  // Met a jour la ref consommee par le Menu du header a chaque render.
+  headerActionsRef.current = {
+    onDuplicate: () => setDuplicateOpen(true),
+    onClear: onClearRange,
+    onDelete: onDeleteRange,
+    busy: setMeals.isPending || generateLlm.isPending,
+  };
+
+  if (!fromDate || !toDate) {
+    return (
+      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+        <Text variant="titleMedium">Plage manquante</Text>
+      </View>
+    );
+  }
+  if (meals.isPending) {
     return (
       <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
         <ActivityIndicator size="large" color={theme.colors.primary} />
       </View>
     );
   }
-  if (planning.isError || !planning.data) {
+  if (meals.isError) {
     return (
       <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
-        <Text variant="titleMedium">Planning introuvable</Text>
-        {planning.error && (
-          <Text style={{ color: theme.colors.onSurfaceVariant, marginTop: 8 }}>
-            {planning.error instanceof ApiError
-              ? `${planning.error.status} - ${planning.error.message}`
-              : (planning.error as Error).message}
-          </Text>
-        )}
+        <Text variant="titleMedium">Erreur de chargement</Text>
+        <Text style={{ color: theme.colors.onSurfaceVariant, marginTop: 8 }}>
+          {meals.error instanceof ApiError
+            ? `${meals.error.status} - ${meals.error.message}`
+            : (meals.error as Error).message}
+        </Text>
       </View>
     );
   }
-
-  const slotsForDay = (date: string) => {
-    const wd = weekdayOf(date);
-    const planSlots = mealPlan.data?.slotConfig[wd] ?? [];
-    const slotsFromMeals = (planning.data?.meals ?? [])
-      .filter((m) => m.date === date)
-      .map((m) => ({ key: m.slotKey }));
-    // union par key, preservant l'ordre du plan-type d'abord
-    const seen = new Set<string>();
-    const out: { key: string }[] = [];
-    for (const s of [...planSlots, ...slotsFromMeals]) {
-      if (!seen.has(s.key)) {
-        seen.add(s.key);
-        out.push({ key: s.key });
-      }
-    }
-    return out;
-  };
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]} edges={[]}>
@@ -583,47 +720,23 @@ export default function PlanningDetailScreen() {
         contentContainerStyle={styles.container}
         refreshControl={
           <RefreshControl
-            refreshing={planning.isFetching && !planning.isPending}
-            onRefresh={() => planning.refetch()}
+            refreshing={meals.isFetching && !meals.isPending}
+            onRefresh={() => meals.refetch()}
             tintColor={theme.colors.primary}
           />
         }
       >
-        <View style={styles.actionsRow}>
-          <Button
-            mode="contained"
-            icon="dice-multiple-outline"
-            onPress={onGenerate}
-            loading={setMeals.isPending && !generateLlm.isPending}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            Aleatoire
-          </Button>
-          <Button
-            mode="contained-tonal"
-            icon="auto-fix"
-            onPress={onGenerateLlm}
-            loading={generateLlm.isPending}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            IA
-          </Button>
-          <Button
-            mode="outlined"
-            icon="delete-sweep-outline"
-            onPress={onClear}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            Effacer
-          </Button>
-        </View>
+        {/* Indicateur de generation en cours (Aleatoire/IA/Dupliquer sont dans le menu ...) */}
+        {(setMeals.isPending || generateLlm.isPending) && (
+          <View style={[styles.busyRow, { backgroundColor: theme.colors.primaryContainer }]}>
+            <ActivityIndicator size="small" color={theme.colors.primary} />
+            <Text variant="labelLarge" style={{ color: theme.colors.onPrimaryContainer }}>
+              {generateLlm.isPending ? 'Generation IA en cours…' : 'Mise a jour des repas…'}
+            </Text>
+          </View>
+        )}
 
+        {/* Une carte par jour */}
         {dates.map((date) => {
           const slots = slotsForDay(date);
           const wd = weekdayOf(date);
@@ -634,7 +747,7 @@ export default function PlanningDetailScreen() {
               style={[styles.dayCard, { backgroundColor: theme.colors.surface }]}
             >
               <View style={styles.dayHeader}>
-                <Text variant="titleMedium" style={styles.dayTitle}>
+                <Text variant="titleMedium" style={{ fontWeight: '700' }}>
                   {WEEKDAY_LABELS[wd]}
                 </Text>
                 <Text variant="labelMedium" style={{ color: theme.colors.onSurfaceVariant }}>
@@ -659,7 +772,7 @@ export default function PlanningDetailScreen() {
                   const coveredRecipe = coveredBy?.recipeId
                     ? recipesById.get(coveredBy.recipeId)
                     : null;
-                  // Cas 1 : slot couvert par un meal multi-meals pose plus tot
+
                   if (coveredBy && !meal) {
                     const sourceWd = WEEKDAY_LABELS[weekdayOf(coveredBy.date)];
                     return (
@@ -710,6 +823,7 @@ export default function PlanningDetailScreen() {
                       </View>
                     );
                   }
+
                   return (
                     <View key={slot.key} style={styles.slotBlock}>
                       <View style={styles.slotRow}>
@@ -728,14 +842,11 @@ export default function PlanningDetailScreen() {
                           borderless
                           onPress={() => {
                             setPickerTarget({ date, slotKey: slot.key });
-                            // pre-renseigne le stepper avec la valeur actuelle si meal existant
                             setPickerCoversMeals(meal?.coversMeals ?? 1);
                             setPickerDiners(meal?.diners ?? []);
                             setRecipePickerOpen(true);
                           }}
                           onLongPress={() => {
-                            // Long press : ouvre la modale IA pre-remplie avec les
-                            // composants du diet plan pour ce slot (si dispos).
                             if (dietComponents.length === 0) {
                               setPickerTarget({ date, slotKey: slot.key });
                               setPickerCoversMeals(meal?.coversMeals ?? 1);
@@ -836,6 +947,97 @@ export default function PlanningDetailScreen() {
         })}
       </ScrollView>
 
+      {/* Barre d'action principale fixe en bas : remplir le planning */}
+      <View style={[styles.bottomBar, { borderTopColor: theme.colors.outlineVariant }]}>
+        <Button
+          mode="contained"
+          icon="playlist-plus"
+          onPress={() => setFillOpen(true)}
+          disabled={setMeals.isPending || generateLlm.isPending}
+          style={styles.fillBtn}
+          contentStyle={styles.fillBtnContent}
+        >
+          Remplir le planning
+        </Button>
+      </View>
+
+      {/* Choix du mode de remplissage : Aleatoire ou IA */}
+      <Portal>
+        <Dialog visible={fillOpen} onDismiss={() => setFillOpen(false)}>
+          <Dialog.Title>Remplir le planning</Dialog.Title>
+          <Dialog.Content style={{ gap: 8 }}>
+            <Button
+              mode="contained"
+              icon="dice-multiple-outline"
+              onPress={() => {
+                setFillOpen(false);
+                onGenerateRandom();
+              }}
+              contentStyle={styles.fillChoiceContent}
+            >
+              Aleatoire (depuis mes recettes)
+            </Button>
+            <Button
+              mode="contained-tonal"
+              icon="auto-fix"
+              onPress={() => {
+                setFillOpen(false);
+                onGenerateLlm();
+              }}
+              contentStyle={styles.fillChoiceContent}
+            >
+              Generer avec l'IA
+            </Button>
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={() => setFillOpen(false)}>Annuler</Button>
+          </Dialog.Actions>
+        </Dialog>
+      </Portal>
+
+      {/* Dialog de duplication : raccourcis +7j / +14j / +28j */}
+      <Portal>
+        <Dialog visible={duplicateOpen} onDismiss={() => setDuplicateOpen(false)}>
+          <Dialog.Title>Dupliquer cette plage</Dialog.Title>
+          <Dialog.Content>
+            <Text variant="bodyMedium" style={{ marginBottom: 12 }}>
+              Plage source : {formatShortDate(fromDate)} → {formatShortDate(toDate)} ({dayCount}{' '}
+              jour{dayCount > 1 ? 's' : ''})
+            </Text>
+            <Text
+              variant="bodySmall"
+              style={{ color: theme.colors.onSurfaceVariant, marginBottom: 12 }}
+            >
+              Choisissez quand commencer la copie :
+            </Text>
+            <View style={{ gap: 8 }}>
+              {[
+                { label: 'Semaine prochaine (+7 jours)', offset: 7 },
+                { label: 'Dans 2 semaines (+14 jours)', offset: 14 },
+                { label: 'Dans 1 mois (+28 jours)', offset: 28 },
+              ].map((opt) => {
+                const target = addDays(fromDate, opt.offset);
+                const targetEnd = addDays(target, dayCount - 1);
+                return (
+                  <Button
+                    key={opt.offset}
+                    mode="outlined"
+                    onPress={() => onDuplicate(target)}
+                    contentStyle={{ paddingVertical: 4, justifyContent: 'flex-start' }}
+                  >
+                    {opt.label} · {formatShortDate(target)} → {formatShortDate(targetEnd)}
+                  </Button>
+                );
+              })}
+            </View>
+          </Dialog.Content>
+          <Dialog.Actions>
+            <Button onPress={() => setDuplicateOpen(false)}>Annuler</Button>
+          </Dialog.Actions>
+        </Dialog>
+      </Portal>
+
+      {/* Picker recette */}
       <Portal>
         <Dialog
           visible={recipePickerOpen}
@@ -918,12 +1120,32 @@ export default function PlanningDetailScreen() {
           )}
           <Dialog.ScrollArea style={{ maxHeight: 360 }}>
             <ScrollView>
-              {(recipes.data?.items ?? []).length === 0 ? (
-                <Text style={{ paddingVertical: 16 }}>
-                  Aucune recette dans la bibliotheque. Creez-en avant de planifier.
-                </Text>
-              ) : (
-                (recipes.data?.items ?? []).map((r) => (
+              {(() => {
+                // Filtre par slot : on garde les recettes taguees pour le slot
+                // cible + celles sans aucun tag (passe-partout). On cache celles
+                // taguees uniquement pour d'autres slots.
+                const slotKey = pickerTarget?.slotKey;
+                const filtered = (recipes.data?.items ?? []).filter((r) => {
+                  if (!slotKey) return true;
+                  if (r.mealSlots.length === 0) return true;
+                  return r.mealSlots.includes(slotKey);
+                });
+                if ((recipes.data?.items ?? []).length === 0) {
+                  return (
+                    <Text style={{ paddingVertical: 16 }}>
+                      Aucune recette dans la bibliotheque. Creez-en avant de planifier.
+                    </Text>
+                  );
+                }
+                if (filtered.length === 0) {
+                  return (
+                    <Text style={{ paddingVertical: 16, color: theme.colors.onSurfaceVariant }}>
+                      Aucune recette pour ce repas. Taguez des recettes pour ce creneau (ou
+                      laissez-les sans tag pour les rendre disponibles partout).
+                    </Text>
+                  );
+                }
+                return filtered.map((r) => (
                   <TouchableRipple
                     key={r.id}
                     onPress={() => onPickRecipe(r.id)}
@@ -939,8 +1161,8 @@ export default function PlanningDetailScreen() {
                       </View>
                     </View>
                   </TouchableRipple>
-                ))
-              )}
+                ));
+              })()}
             </ScrollView>
           </Dialog.ScrollArea>
           <Dialog.Actions>
@@ -978,43 +1200,36 @@ export default function PlanningDetailScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  container: {
-    padding: 16,
-    gap: 10,
-    paddingBottom: 32,
+  container: { padding: 16, gap: 12, paddingBottom: 32 },
+
+  bottomBar: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
-  actionsRow: {
+  fillBtn: { borderRadius: 14 },
+  fillBtnContent: { paddingVertical: 6 },
+  fillChoiceContent: { paddingVertical: 6, justifyContent: 'flex-start' },
+  busyRow: {
     flexDirection: 'row',
-    gap: 8,
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
   },
-  flexBtn: { flex: 1, borderRadius: 12 },
-  btnContent: { paddingVertical: 4 },
-  dayCard: {
-    padding: 12,
-    borderRadius: 14,
-    gap: 6,
-  },
+
+  dayCard: { padding: 12, borderRadius: 14, gap: 6 },
   dayHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'baseline',
     marginBottom: 4,
   },
-  dayTitle: { fontWeight: '700' },
-  slotBlock: {
-    gap: 4,
-  },
-  slotRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-  },
-  slotLabel: {
-    width: 70,
-    // S'aligne verticalement avec le centre de la 1re ligne du mealBox
-    // (paddingVertical 6 + ~10px de demi-hauteur du texte bodyMedium)
-    paddingTop: 8,
-  },
+  slotBlock: { gap: 4 },
+  slotRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  slotLabel: { width: 70, paddingTop: 8 },
   mealBox: {
     flex: 1,
     borderRadius: 10,
@@ -1023,53 +1238,22 @@ const styles = StyleSheet.create({
     minHeight: 38,
     justifyContent: 'center',
   },
-  mealBoxCovered: {
-    borderStyle: 'dashed',
-    borderWidth: 1,
-  },
-  coveredArrow: {
-    fontSize: 14,
-    marginRight: 6,
-    opacity: 0.6,
-  },
-  mealBoxColumn: {
-    flexDirection: 'column',
-    gap: 0,
-  },
-  mealBoxInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  mealActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
+  mealBoxCovered: { borderStyle: 'dashed', borderWidth: 1 },
+  coveredArrow: { fontSize: 14, marginRight: 6, opacity: 0.6 },
+  mealBoxColumn: { flexDirection: 'column', gap: 0 },
+  mealBoxInner: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  mealActions: { flexDirection: 'row', alignItems: 'center' },
   mealActionIcon: { margin: 0 },
-  coversBadge: {
-    height: 24,
-    marginRight: 2,
-  },
-  coversBadgeText: {
-    fontSize: 11,
-    lineHeight: 14,
-    marginVertical: 0,
-  },
+  coversBadge: { height: 24, marginRight: 2 },
+  coversBadgeText: { fontSize: 11, lineHeight: 14, marginVertical: 0 },
   coversRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 24,
     paddingBottom: 8,
   },
-  dinersBlock: {
-    paddingHorizontal: 24,
-    paddingBottom: 8,
-  },
-  dinersChipsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
+  dinersBlock: { paddingHorizontal: 24, paddingBottom: 8 },
+  dinersChipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   pickerRow: {
     paddingVertical: 12,
     paddingHorizontal: 4,

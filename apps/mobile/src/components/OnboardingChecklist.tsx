@@ -4,17 +4,21 @@
  *  1. plan-type configure (au moins 1 slot par jour)
  *  2. plan alimentaire personnel configure
  *  3. au moins 1 recette dans la bibliotheque
- *  4. au moins 1 planning cree
+ *  4. au moins 1 repas planifie cette semaine
  *
  * Quand toutes les etapes sont validees, le composant ne rend rien
  * (il disparait completement, sans tracer "100%").
  */
+import { useAuth } from '@/hooks/useAuth';
 import { useMyDietPlan } from '@/hooks/useDietPlans';
-import { useMealPlan, usePlannings } from '@/hooks/usePlannings';
+import { useHouseholdDetail } from '@/hooks/useHouseholds';
+import { useMealPlan, useMealsRange } from '@/hooks/usePlannings';
 import { useRecipes } from '@/hooks/useRecipes';
+import { addDays, startOfWeek, todayIso } from '@/lib/dates';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { router } from 'expo-router';
+import { useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { ProgressBar, Surface, Text, TouchableRipple, useTheme } from 'react-native-paper';
 
@@ -24,23 +28,27 @@ type Step = {
   description: string;
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   done: boolean;
-  /** Route a ouvrir au tap. */
   onPress: () => void;
 };
 
 export function OnboardingChecklist() {
   const theme = useTheme();
   const householdId = useActiveHousehold((s) => s.householdId);
+  const { session } = useAuth();
 
   const mealPlan = useMealPlan(householdId);
   const myDietPlan = useMyDietPlan(householdId);
   const recipes = useRecipes(householdId);
-  const plannings = usePlannings(householdId);
+  const householdDetail = useHouseholdDetail(householdId);
+  const isOwner = !!session?.user?.id && householdDetail.data?.ownerId === session.user.id;
+  const weekRange = useMemo(() => {
+    const start = startOfWeek(todayIso());
+    return { from: start, to: addDays(start, 6) };
+  }, []);
+  const meals = useMealsRange(householdId, weekRange.from, weekRange.to);
 
-  // Toutes les queries doivent etre chargees pour eviter de flasher la
-  // checklist puis de la faire disparaitre.
   const isLoading =
-    mealPlan.isPending || myDietPlan.isPending || recipes.isPending || plannings.isPending;
+    mealPlan.isPending || myDietPlan.isPending || recipes.isPending || meals.isPending;
   if (isLoading) return null;
 
   const slotConfigured =
@@ -53,17 +61,22 @@ export function OnboardingChecklist() {
       myDietPlan.data.goals.length > 0 ||
       Object.values(myDietPlan.data.dietPlan.slots).some((s) => (s ?? []).length > 0));
   const hasRecipes = (recipes.data?.items.length ?? 0) > 0;
-  const hasPlannings = (plannings.data?.length ?? 0) > 0;
+  const hasMealsThisWeek = (meals.data?.meals.length ?? 0) > 0;
 
   const steps: Step[] = [
-    {
-      key: 'meal-plan',
-      label: 'Configurer mon plan-type',
-      description: 'Definissez les repas de la semaine (petit-dej, dejeuner, diner...).',
-      icon: 'calendar-clock',
-      done: slotConfigured,
-      onPress: () => router.push('/(app)/(tabs)/planning/meal-plan'),
-    },
+    // Etape reservee au proprietaire : configurer la semaine type du foyer.
+    ...(isOwner
+      ? [
+          {
+            key: 'meal-plan',
+            label: 'Configurer mon plan-type',
+            description: 'Definissez les repas de la semaine (petit-dej, dejeuner, diner...).',
+            icon: 'calendar-clock',
+            done: slotConfigured,
+            onPress: () => router.push('/(app)/(tabs)/planning/meal-plan'),
+          } as Step,
+        ]
+      : []),
     {
       key: 'diet-plan',
       label: 'Mon plan alimentaire',
@@ -82,10 +95,10 @@ export function OnboardingChecklist() {
     },
     {
       key: 'planning',
-      label: 'Creer ma premiere semaine',
-      description: 'Generez votre planning de la semaine.',
+      label: 'Faire votre premiere planification',
+      description: 'Posez votre premier repas sur le calendrier.',
       icon: 'calendar-blank',
-      done: hasPlannings,
+      done: hasMealsThisWeek,
       onPress: () => router.push('/(app)/(tabs)/planning'),
     },
   ];

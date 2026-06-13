@@ -817,12 +817,14 @@ export type UpsertMealPlanInput = z.infer<typeof UpsertMealPlanInputSchema>;
 /**
  * Planning : un planning genere pour une periode.
  */
-export const PlanningStatusSchema = z.enum(['draft', 'active', 'archived']);
-export type PlanningStatus = z.infer<typeof PlanningStatusSchema>;
-
 export const PlannedMealSchema = z.object({
   id: UuidSchema,
-  planningId: UuidSchema,
+  /**
+   * Foyer auquel ce repas appartient. Depuis la refonte calendrier libre,
+   * les meals ne sont plus regroupes par 'planning' (entite supprimee) et
+   * sont rattaches directement au foyer.
+   */
+  householdId: UuidSchema,
   date: z.string(), // YYYY-MM-DD
   slotKey: MealSlotKeySchema,
   recipeId: UuidSchema.nullable(),
@@ -847,35 +849,73 @@ export const PlannedMealSchema = z.object({
 });
 export type PlannedMeal = z.infer<typeof PlannedMealSchema>;
 
-export const PlanningSchema = z.object({
+/**
+ * Reponse "tous les meals d'un foyer dans une fenetre [dateFrom, dateTo]".
+ * Remplace l'ancienne structure PlanningWithMeals (qui dependait d'une entite
+ * planning supprimee).
+ */
+export const MealsRangeSchema = z.object({
+  householdId: UuidSchema,
+  dateFrom: z.string(), // YYYY-MM-DD
+  dateTo: z.string(), // YYYY-MM-DD
+  meals: z.array(PlannedMealSchema),
+});
+export type MealsRange = z.infer<typeof MealsRangeSchema>;
+
+// ============================================================================
+// MealPlanRange : plage nommee persistee
+//
+// Permet de "marquer" une fenetre de jours sur le calendrier pour la dupliquer
+// plus tard. Les repas eux-memes restent dans planned_meals.
+// ============================================================================
+export const MealPlanRangeSchema = z.object({
   id: UuidSchema,
   householdId: UuidSchema,
-  mealPlanId: UuidSchema.nullable(),
   name: z.string(),
-  startDate: z.string(),
-  endDate: z.string(),
-  status: PlanningStatusSchema,
+  dateFrom: z.string(), // YYYY-MM-DD
+  dateTo: z.string(), // YYYY-MM-DD
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
-export type Planning = z.infer<typeof PlanningSchema>;
+export type MealPlanRange = z.infer<typeof MealPlanRangeSchema>;
 
-export const PlanningWithMealsSchema = PlanningSchema.extend({
-  meals: z.array(PlannedMealSchema),
+export const CreateMealPlanRangeInputSchema = z.object({
+  householdId: UuidSchema,
+  name: z.string().max(80), // peut etre vide : plage sans nom
+  dateFrom: z.string(),
+  dateTo: z.string(),
 });
-export type PlanningWithMeals = z.infer<typeof PlanningWithMealsSchema>;
+export type CreateMealPlanRangeInput = z.infer<typeof CreateMealPlanRangeInputSchema>;
+
+export const UpdateMealPlanRangeInputSchema = z.object({
+  name: z.string().min(1).max(80).optional(),
+  dateFrom: z.string().optional(),
+  dateTo: z.string().optional(),
+});
+export type UpdateMealPlanRangeInput = z.infer<typeof UpdateMealPlanRangeInputSchema>;
 
 /**
- * Inputs CRUD planning
+ * Duplique tous les repas presents dans [sourceFrom, sourceTo] vers une
+ * nouvelle plage commencant a targetStart. Optionnellement cree aussi une
+ * meal_plan_ranges nommee.
  */
-export const CreatePlanningInputSchema = z.object({
+export const DuplicateMealsRangeInputSchema = z.object({
   householdId: UuidSchema,
-  startDate: z.string(),
-  endDate: z.string(),
-  mealPlanId: UuidSchema.nullable().optional(),
-  name: z.string().min(1).max(100).optional(),
+  sourceFrom: z.string(),
+  sourceTo: z.string(),
+  targetStart: z.string(),
+  /** Si fournie, cree aussi une nouvelle plage nommee a la cible. */
+  createRangeName: z.string().min(1).max(80).optional(),
 });
-export type CreatePlanningInput = z.infer<typeof CreatePlanningInputSchema>;
+export type DuplicateMealsRangeInput = z.infer<typeof DuplicateMealsRangeInputSchema>;
+
+export const DuplicateMealsRangeResponseSchema = z.object({
+  inserted: z.number().int().nonnegative(),
+  targetFrom: z.string(),
+  targetTo: z.string(),
+  rangeId: UuidSchema.nullable(),
+});
+export type DuplicateMealsRangeResponse = z.infer<typeof DuplicateMealsRangeResponseSchema>;
 
 export const PlannedMealInputSchema = z.object({
   date: z.string(),
@@ -891,11 +931,17 @@ export const PlannedMealInputSchema = z.object({
 });
 export type PlannedMealInput = z.infer<typeof PlannedMealInputSchema>;
 
-export const SetPlanningMealsInputSchema = z.object({
+export const SetMealsRangeInputSchema = z.object({
+  /** Date de debut de la fenetre (inclusive) YYYY-MM-DD */
+  dateFrom: z.string(),
+  /** Date de fin de la fenetre (inclusive) YYYY-MM-DD */
+  dateTo: z.string(),
+  /** Meals a placer dans la fenetre. Toutes les dates DOIVENT etre dans [dateFrom, dateTo]. */
   meals: z.array(PlannedMealInputSchema),
+  /** Si true, les meals existants avec locked=true dans la fenetre sont conserves. */
   keepLocked: z.boolean().default(true),
 });
-export type SetPlanningMealsInput = z.infer<typeof SetPlanningMealsInputSchema>;
+export type SetMealsRangeInput = z.infer<typeof SetMealsRangeInputSchema>;
 
 export const UpdatePlannedMealInputSchema = z.object({
   recipeId: UuidSchema.nullable().optional(),
@@ -920,7 +966,9 @@ export const ShoppingItemSchema = z.object({
 export type ShoppingItem = z.infer<typeof ShoppingItemSchema>;
 
 export const ShoppingListResponseSchema = z.object({
-  planningId: UuidSchema,
+  householdId: UuidSchema,
+  dateFrom: z.string(),
+  dateTo: z.string(),
   items: z.array(ShoppingItemSchema),
 });
 export type ShoppingListResponse = z.infer<typeof ShoppingListResponseSchema>;
@@ -1019,18 +1067,23 @@ export type LlmQuotaResponse = z.infer<typeof LlmQuotaResponseSchema>;
 // ============================================================================
 
 /**
- * Input : on demande au LLM de remplir le planning sur la fenetre [startDate, endDate]
- * en piochant uniquement parmi les recettes deja presentes en bibliotheque.
+ * Input : on demande au LLM de remplir une fenetre [dateFrom, dateTo] avec
+ * des meals, en piochant parmi les recettes deja en bibliotheque (ou en en
+ * creant de nouvelles selon `mode`).
  *
  * Le serveur enrichit le prompt avec :
- *  - le slot config (jours x slots) du plan-type
- *  - le diet plan (composants requis par slot)
+ *  - le slot config (jours x slots) du plan-type du foyer
+ *  - le diet plan (composants requis par slot, agrege multi-membres)
  *  - les recettes existantes (titre + slots cibles + tags + servings)
- *  - les meals deja locked dans le planning (pour ne pas les ecraser)
+ *  - les meals deja locked dans la fenetre (pour ne pas les ecraser)
  *  - les regles de variete (minDaysBetweenSameRecipe)
  */
 export const GeneratePlanningInputSchema = z.object({
-  planningId: UuidSchema,
+  householdId: UuidSchema,
+  /** Date de debut de la fenetre (inclusive) YYYY-MM-DD */
+  dateFrom: z.string(),
+  /** Date de fin de la fenetre (inclusive) YYYY-MM-DD */
+  dateTo: z.string(),
   /** Si true on conserve les meals deja locked. Defaut true. */
   keepLocked: z.boolean().default(true),
   /** Texte libre additionnel pour orienter l'IA (ex : "semaine plutot mediterraneenne"). */
@@ -1078,6 +1131,42 @@ export const GeneratePlanningResponseSchema = z.object({
   }),
 });
 export type GeneratePlanningResponse = z.infer<typeof GeneratePlanningResponseSchema>;
+
+// ============================================================================
+// LLM : parsing d'un plan alimentaire depuis une image
+//
+// Use case : l'utilisateur a une photo / capture d'ecran d'un plan
+// alimentaire (papier dieteticien, doc imprime, capture web...) et veut
+// l'importer dans Mealendar plutot que de tout saisir a la main.
+//
+// Le LLM (Gemini Flash, qui supporte les images) recoit l'image en base64,
+// extrait les composants par slot + les regles globales, et renvoie un
+// DietPlan structure que le client previsualise avant de l'appliquer.
+// ============================================================================
+
+export const ParseDietPlanFromImageInputSchema = z.object({
+  /** Image base64 (sans le prefixe data:image/...). */
+  imageBase64: z.string().min(1),
+  /** MIME de l'image (image/jpeg, image/png, image/webp). */
+  mimeType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+  /** Hint optionnel pour orienter l'extraction. */
+  hint: z.string().max(500).optional(),
+});
+export type ParseDietPlanFromImageInput = z.infer<typeof ParseDietPlanFromImageInputSchema>;
+
+export const ParseDietPlanFromImageResponseSchema = z.object({
+  dietPlan: DietPlanSchema,
+  /** Resume textuel court (ce que le LLM a vu). */
+  summary: z.string().max(500).optional(),
+  /** Confidence 0..1 que l'extraction est correcte (heuristique LLM). */
+  confidence: z.number().min(0).max(1).optional(),
+  meta: z.object({
+    model: z.string(),
+    cacheHit: z.boolean(),
+    generatedAt: z.string().datetime(),
+  }),
+});
+export type ParseDietPlanFromImageResponse = z.infer<typeof ParseDietPlanFromImageResponseSchema>;
 
 // ============================================================================
 // Import recette depuis URL

@@ -1,9 +1,13 @@
 import { useShoppingList } from '@/hooks/usePlannings';
-import { ApiError } from '@/lib/api';
+import { ApiError, fetchHouseholdIcs } from '@/lib/api';
+import { todayIso } from '@/lib/dates';
+import { useActiveHousehold } from '@/stores/activeHousehold';
 import type { ShoppingItem } from '@mealendar/shared';
+import * as FileSystem from 'expo-file-system';
 import { useLocalSearchParams } from 'expo-router';
+import * as Sharing from 'expo-sharing';
 import { useMemo, useState } from 'react';
-import { RefreshControl, ScrollView, Share, StyleSheet, View } from 'react-native';
+import { Alert, RefreshControl, ScrollView, Share, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Button,
@@ -17,10 +21,20 @@ import {
 } from 'react-native-paper';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+/**
+ * Liste de courses pour une fenetre arbitraire [from, to].
+ * Recoit les bornes en query params (sinon fallback sur 7 jours a partir
+ * d'aujourd'hui).
+ */
 export default function ShoppingListScreen() {
   const theme = useTheme();
-  const { id } = useLocalSearchParams<{ id: string }>();
-  const list = useShoppingList(id);
+  const householdId = useActiveHousehold((s) => s.householdId);
+  const params = useLocalSearchParams<{ from?: string; to?: string }>();
+  const today = todayIso();
+  const from = params.from ?? today;
+  const to = params.to ?? today;
+
+  const list = useShoppingList(householdId, from, to);
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState('');
 
@@ -41,20 +55,57 @@ export default function ShoppingListScreen() {
     try {
       await Share.share({
         title: 'Liste de courses Mealendar',
-        message: `Liste de courses (Mealendar)\n\n${text}`,
+        message: `Liste de courses (${from} → ${to})\n\n${text}`,
       });
     } catch {
       // share annule
     }
   };
 
+  const onExportIcs = async () => {
+    if (!householdId) return;
+    try {
+      const ics = await fetchHouseholdIcs(householdId, from, to);
+      const file = new FileSystem.File(FileSystem.Paths.cache, `mealendar-${from}_${to}.ics`);
+      if (file.exists) file.delete();
+      file.create();
+      file.write(ics);
+      const ok = await Sharing.isAvailableAsync();
+      if (!ok) {
+        Alert.alert(
+          'Partage indisponible',
+          "Le fichier a ete cree mais le partage natif n'est pas dispo.",
+        );
+        return;
+      }
+      await Sharing.shareAsync(file.uri, {
+        mimeType: 'text/calendar',
+        dialogTitle: 'Exporter vers calendrier',
+        UTI: 'public.calendar-event',
+      });
+    } catch (e) {
+      Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+    }
+  };
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]} edges={[]}>
       <View style={styles.headerRow}>
-        <Text variant="titleLarge" style={styles.title}>
-          {items.length} ingredient{items.length > 1 ? 's' : ''}
-        </Text>
+        <View style={{ flex: 1 }}>
+          <Text variant="titleLarge" style={styles.title}>
+            {items.length} ingredient{items.length > 1 ? 's' : ''}
+          </Text>
+          <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+            {from} → {to}
+          </Text>
+        </View>
         <View style={{ flexDirection: 'row', gap: 4 }}>
+          <IconButton
+            icon="calendar-export"
+            onPress={onExportIcs}
+            disabled={items.length === 0}
+            iconColor={theme.colors.onSurfaceVariant}
+          />
           <IconButton
             icon="share-variant"
             onPress={onShare}
@@ -199,10 +250,10 @@ const styles = StyleSheet.create({
   safe: { flex: 1 },
   headerRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingTop: 4,
+    gap: 4,
   },
   title: { fontWeight: '700' },
   search: {
@@ -212,30 +263,13 @@ const styles = StyleSheet.create({
     borderRadius: 12,
   },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  empty: {
-    margin: 16,
-    padding: 24,
-    borderRadius: 16,
-    alignItems: 'center',
-  },
+  empty: { margin: 16, padding: 24, borderRadius: 16, alignItems: 'center' },
   emptyEmoji: { fontSize: 36, marginBottom: 8 },
   emptyTitle: { fontWeight: '700' },
   emptyBody: { textAlign: 'center', marginTop: 4 },
-  list: {
-    paddingHorizontal: 16,
-    paddingBottom: 32,
-  },
+  list: { paddingHorizontal: 16, paddingBottom: 32 },
   remaining: { letterSpacing: 0.5, marginBottom: 8 },
-  row: {
-    borderRadius: 12,
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    marginBottom: 6,
-  },
-  rowInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
+  row: { borderRadius: 12, paddingVertical: 6, paddingHorizontal: 8, marginBottom: 6 },
+  rowInner: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   itemName: { fontWeight: '600' },
 });

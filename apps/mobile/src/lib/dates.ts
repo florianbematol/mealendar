@@ -82,3 +82,121 @@ export function formatShortDate(s: string): string {
   const d = fromIsoDate(s);
   return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
+
+/**
+ * Format long e.g. "Lundi 1 fevrier 2026" (utile pour ecran jour).
+ */
+const FR_MONTHS = [
+  'janvier',
+  'fevrier',
+  'mars',
+  'avril',
+  'mai',
+  'juin',
+  'juillet',
+  'aout',
+  'septembre',
+  'octobre',
+  'novembre',
+  'decembre',
+];
+
+/** Mois abreges FR (index 0 = janvier), utile pour les selecteurs compacts. */
+export const FR_MONTHS_SHORT = [
+  'janv.',
+  'fevr.',
+  'mars',
+  'avr.',
+  'mai',
+  'juin',
+  'juil.',
+  'aout',
+  'sept.',
+  'oct.',
+  'nov.',
+  'dec.',
+] as const;
+
+/** Construit un YYYY-MM-01 a partir d'une annee et d'un index de mois (0-11). */
+export function isoFromYearMonth(year: number, monthIndex: number): string {
+  return toIsoDate(new Date(year, monthIndex, 1));
+}
+
+/** Annee (number) d'une date ISO. */
+export function yearOf(s: string): number {
+  return fromIsoDate(s).getFullYear();
+}
+
+/** Index de mois (0-11) d'une date ISO. */
+export function monthIndexOf(s: string): number {
+  return fromIsoDate(s).getMonth();
+}
+export function formatLongDate(s: string): string {
+  const d = fromIsoDate(s);
+  const wd = weekdayOf(s);
+  const wdLabel = WEEKDAY_LABELS[wd];
+  return `${wdLabel} ${d.getDate()} ${FR_MONTHS[d.getMonth()] ?? ''} ${d.getFullYear()}`;
+}
+
+export function formatMonthYear(s: string): string {
+  const d = fromIsoDate(s);
+  return `${(FR_MONTHS[d.getMonth()] ?? '').replace(/^./, (c) => c.toUpperCase())} ${d.getFullYear()}`;
+}
+
+/**
+ * Premier jour du mois (string YYYY-MM-01).
+ */
+export function startOfMonth(s: string): string {
+  const d = fromIsoDate(s);
+  return toIsoDate(new Date(d.getFullYear(), d.getMonth(), 1));
+}
+
+/**
+ * Dernier jour du mois.
+ */
+export function endOfMonth(s: string): string {
+  const d = fromIsoDate(s);
+  return toIsoDate(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+}
+
+/**
+ * Decale d'un mois (peut etre negatif).
+ */
+export function addMonths(s: string, n: number): string {
+  const d = fromIsoDate(s);
+  d.setMonth(d.getMonth() + n);
+  return toIsoDate(d);
+}
+
+/**
+ * Renvoie la grille de 6 semaines (42 cases) couvrant le mois de `s`,
+ * en alignant sur le lundi (peut deborder sur le mois precedent et suivant).
+ * Chaque case = string YYYY-MM-DD.
+ */
+export function monthGrid(s: string): string[] {
+  const first = startOfMonth(s);
+  const wd = weekdayOf(first);
+  const idx = WEEKDAYS.indexOf(wd); // 0 = lundi
+  const gridStart = addDays(first, -idx);
+  const cells: string[] = [];
+  for (let i = 0; i < 42; i++) cells.push(addDays(gridStart, i));
+  return cells;
+}
+
+/**
+ * Renvoie true si `s` appartient au mois de `ref` (utile pour griser les
+ * cases hors mois courant dans la grille).
+ */
+export function isSameMonth(s: string, ref: string): boolean {
+  const a = fromIsoDate(s);
+  const b = fromIsoDate(ref);
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth();
+}
+
+/**
+ * Renvoie les 7 dates de la semaine de `s` (lundi -> dimanche).
+ */
+export function weekDates(s: string): string[] {
+  const start = startOfWeek(s);
+  return Array.from({ length: 7 }, (_, i) => addDays(start, i));
+}

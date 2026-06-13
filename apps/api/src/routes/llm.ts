@@ -1,10 +1,14 @@
 import {
   type DietComponent,
+  type DietPlan,
+  DietPlanSchema,
   GeneratePlanningInputSchema,
   type GeneratePlanningResponse,
   GenerateRecipeInputSchema,
   type GenerateRecipeResponse,
   type LlmQuotaResponse,
+  ParseDietPlanFromImageInputSchema,
+  type ParseDietPlanFromImageResponse,
   type RecipeWithIngredients,
   type UserDietPlan,
   aggregateDietPlansForSlot,
@@ -17,6 +21,8 @@ import {
   LlmNotConfiguredError,
   generatePlanningDraft,
   generateRecipeDraft,
+  normalizeParsedDietPlan,
+  parseDietPlanFromImage,
 } from '../lib/llm';
 import { getUserClient } from '../lib/supabase';
 import { getAuth, requireAuth } from '../middleware/auth';
@@ -215,22 +221,17 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const input = parsed.data;
   const sb = getUserClient(c.env, auth.accessToken);
 
-  // 1. Recupere le planning + ses meals
-  const { data: planning, error: planErr } = await sb
-    .from('plannings')
-    .select('id, household_id, start_date, end_date')
-    .eq('id', input.planningId)
-    .single();
-  if (planErr || !planning) {
-    return c.json({ error: 'not_found', message: 'Planning introuvable' }, 404);
+  // 1. Verifie l'appartenance + recupere les bornes
+  const { data: hh, error: hhErr } = await sb
+    .from('households')
+    .select('id')
+    .eq('id', input.householdId)
+    .maybeSingle();
+  if (hhErr || !hh) {
+    return c.json({ error: 'not_found', message: 'Foyer introuvable' }, 404);
   }
-  type PlanningRow = {
-    id: string;
-    household_id: string;
-    start_date: string;
-    end_date: string;
-  };
-  const p = planning as unknown as PlanningRow;
+  const startDate = input.dateFrom;
+  const endDate = input.dateTo;
 
   // 2. Rate limit (un seul appel LLM = 1 unit)
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
@@ -258,7 +259,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const { data: mp, error: mpErr } = await sb
     .from('meal_plans')
     .select('slot_config, variety_rules')
-    .eq('household_id', p.household_id)
+    .eq('household_id', input.householdId)
     .maybeSingle();
   if (mpErr) {
     return c.json({ error: 'db_error', message: mpErr.message }, 500);
@@ -283,7 +284,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
 
   // 3b. Charge les profils dietetiques de tous les membres du foyer
   const { data: dietPlansData, error: dpErr } = await sb.rpc('list_household_diet_plans', {
-    p_household_id: p.household_id,
+    p_household_id: input.householdId,
   });
   if (dpErr) {
     return c.json({ error: 'db_error', message: dpErr.message }, 500);
@@ -305,7 +306,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const { data: recipesRows, error: recErr } = await sb
     .from('recipes')
     .select('id, title, servings, meal_slots, diet_tags, description')
-    .eq('household_id', p.household_id)
+    .eq('household_id', input.householdId)
     .order('created_at', { ascending: false })
     .limit(150);
   if (recErr) {
@@ -337,11 +338,13 @@ llmRouter.post('/llm/generate-planning', async (c) => {
     );
   }
 
-  // 5. Meals deja presents (pour les locked + indication varieties)
+  // 5. Meals deja presents dans la fenetre (pour les locked + variete)
   const { data: mealsRows, error: mealsErr } = await sb
     .from('planned_meals')
     .select('date, slot_key, recipe_id, locked')
-    .eq('planning_id', p.id);
+    .eq('household_id', input.householdId)
+    .gte('date', startDate)
+    .lte('date', endDate);
   if (mealsErr) {
     return c.json({ error: 'db_error', message: mealsErr.message }, 500);
   }
@@ -362,14 +365,14 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   const { data: members, error: memErr } = await sb
     .from('household_members')
     .select('user_id', { count: 'exact', head: false })
-    .eq('household_id', p.household_id);
+    .eq('household_id', input.householdId);
   const memberCount = memErr ? 4 : Math.max(1, (members ?? []).length);
 
   // 7. Construit la liste des slots a remplir (date x slotKey du plan-type)
   //    en utilisant rangeDates + weekdayOf, et en agregeant les diet plans
   //    de tous les membres pour chaque slot.
   const { rangeDates, weekdayOf } = await import('../lib/dates');
-  const dates = rangeDates(p.start_date, p.end_date);
+  const dates = rangeDates(startDate, endDate);
   const slotsToFill: GeneratePlanningContext['slots'] = [];
 
   // Construit les UserDietPlan minimaux pour aggregateDietPlansForSlot.
@@ -378,7 +381,7 @@ llmRouter.post('/llm/generate-planning', async (c) => {
     id: m.userId,
     userId: m.userId,
     userEmail: null,
-    householdId: p.household_id,
+    householdId: input.householdId,
     dietPlan: (m.dietPlan ?? {
       slots: {},
       dailyRules: [],
@@ -426,8 +429,8 @@ llmRouter.post('/llm/generate-planning', async (c) => {
 
   // 8. Appel LLM
   const ctx: GeneratePlanningContext = {
-    startDate: p.start_date,
-    endDate: p.end_date,
+    startDate: startDate,
+    endDate: endDate,
     minDaysBetweenSameRecipe: mealPlan.variety_rules?.minDaysBetweenSameRecipe ?? 2,
     memberCount,
     slots: slotsToFill,
@@ -456,10 +459,12 @@ llmRouter.post('/llm/generate-planning', async (c) => {
   }
 
   // 9. Audit
-  const promptHash = await sha256Hex(`planning:${p.id}:${slotsToFill.length}`);
+  const promptHash = await sha256Hex(
+    `planning:${input.householdId}:${startDate}:${endDate}:${slotsToFill.length}`,
+  );
   void sb
     .rpc('record_llm_usage', {
-      p_household_id: p.household_id,
+      p_household_id: input.householdId,
       p_kind: 'planning',
       p_model: outcome.model,
       p_prompt_hash: promptHash,
@@ -493,13 +498,15 @@ llmRouter.post('/llm/generate-planning', async (c) => {
       coversMeals: m.coversMeals ?? 1,
     }));
 
-  const { error: setErr } = await sb.rpc('set_planning_meals', {
-    p_planning_id: p.id,
+  const { error: setErr } = await sb.rpc('set_meals_for_range', {
+    p_household_id: input.householdId,
+    p_date_from: startDate,
+    p_date_to: endDate,
     p_meals: finalMeals,
     p_keep_locked: input.keepLocked,
   });
   if (setErr) {
-    console.error('[llm/generate-planning] set_planning_meals failed', setErr);
+    console.error('[llm/generate-planning] set_meals_for_range failed', setErr);
     return c.json({ error: 'db_error', message: setErr.message }, 500);
   }
 
@@ -509,6 +516,130 @@ llmRouter.post('/llm/generate-planning', async (c) => {
     output: outcome.output,
     filled,
     skipped: Math.max(0, skipped),
+    meta: {
+      model: outcome.model,
+      cacheHit: outcome.cacheHit,
+      generatedAt: new Date().toISOString(),
+    },
+  };
+  return c.json(payload);
+});
+
+// ============================================================================
+// POST /api/llm/parse-diet-plan-image
+//
+// Recoit une image base64 (photo / capture d'ecran d'un plan alimentaire),
+// renvoie un DietPlan structure pour previsualisation cote client.
+// L'utilisateur valide ensuite et l'applique via upsert_user_diet_plan.
+//
+// Rate limit : 1 unit (= 1 generation LLM, comme generate-recipe).
+// Cache : 30 jours sur le hash de (image + hint).
+// ============================================================================
+llmRouter.post('/llm/parse-diet-plan-image', async (c) => {
+  const auth = getAuth(c);
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid_json' }, 400);
+  }
+  const parsed = ParseDietPlanFromImageInputSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'validation', issues: parsed.error.issues }, 400);
+  }
+  const input = parsed.data;
+  const sb = getUserClient(c.env, auth.accessToken);
+
+  // 1. Rate limit (les cache hits ne comptent pas)
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const { data: usedData, error: countErr } = await sb.rpc('count_llm_usage_since', {
+    p_since: since,
+  });
+  if (countErr) {
+    return c.json({ error: 'db_error', message: countErr.message }, 500);
+  }
+  const used = typeof usedData === 'number' ? usedData : 0;
+  if (used >= DAILY_LIMIT) {
+    return c.json(
+      {
+        error: 'rate_limited',
+        message: `Limite quotidienne atteinte (${DAILY_LIMIT} generations / 24h).`,
+        used24h: used,
+        dailyLimit: DAILY_LIMIT,
+      },
+      429,
+    );
+  }
+
+  // 2. Appel Gemini Vision
+  let outcome: Awaited<ReturnType<typeof parseDietPlanFromImage>>;
+  try {
+    outcome = await parseDietPlanFromImage(
+      {
+        imageBase64: input.imageBase64,
+        mimeType: input.mimeType,
+        hint: input.hint,
+      },
+      {
+        GEMINI_API_KEY: c.env.GEMINI_API_KEY,
+        GROQ_API_KEY: c.env.GROQ_API_KEY,
+        CACHE: c.env.CACHE,
+      },
+    );
+  } catch (err) {
+    console.error('[llm/parse-diet-plan-image] failed', err);
+    if (err instanceof LlmNotConfiguredError) {
+      return c.json(
+        {
+          error: 'llm_not_configured',
+          message: err.message,
+          hint: 'GEMINI_API_KEY non definie en environnement.',
+        },
+        503,
+      );
+    }
+    return c.json({ error: 'llm_failed', message: (err as Error).message }, 502);
+  }
+
+  // 3. Normalisation post-LLM (mapping categories EN->FR + ids manquants
+  // + alternatives par defaut), puis validation Zod stricte. Si la
+  // validation echoue malgre la normalisation, on renvoie 422.
+  const dietPlanCandidate = normalizeParsedDietPlan(outcome.parsed);
+  const validated = DietPlanSchema.safeParse(dietPlanCandidate);
+  if (!validated.success) {
+    console.warn('[llm/parse-diet-plan-image] invalid DietPlan from LLM', validated.error.issues);
+    return c.json(
+      {
+        error: 'invalid_extraction',
+        message: "L'IA n'a pas reussi a extraire un plan alimentaire valide depuis cette image.",
+        issues: validated.error.issues,
+      },
+      422,
+    );
+  }
+  const dietPlan: DietPlan = validated.data;
+
+  // 4. Audit (best-effort, on ne bloque pas la reponse si ca echoue)
+  const promptHash = await sha256Hex(`diet-img:${input.imageBase64.length}:${input.hint ?? ''}`);
+  void sb
+    .rpc('record_llm_usage', {
+      p_household_id: null,
+      p_kind: 'diet-plan-image',
+      p_model: outcome.model,
+      p_prompt_hash: promptHash,
+      p_cache_hit: outcome.cacheHit,
+      p_tokens_in: outcome.tokensIn ?? null,
+      p_tokens_out: outcome.tokensOut ?? null,
+    })
+    .then(({ error }: { error: { message: string } | null }) => {
+      if (error) console.warn('[llm/parse-diet-plan-image] record_llm_usage failed', error);
+    });
+
+  const payload: ParseDietPlanFromImageResponse = {
+    dietPlan,
+    summary: outcome.parsed.summary,
+    confidence: outcome.parsed.confidence,
     meta: {
       model: outcome.model,
       cacheHit: outcome.cacheHit,

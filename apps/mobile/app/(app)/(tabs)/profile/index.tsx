@@ -1,5 +1,6 @@
 import { Topbar } from '@/components/Topbar';
 import { useAuth } from '@/hooks/useAuth';
+import { useHouseholdDetail } from '@/hooks/useHouseholds';
 import { useMe } from '@/hooks/useMe';
 import { sendTestPush } from '@/lib/api';
 import { haptics } from '@/lib/haptics';
@@ -21,6 +22,8 @@ export default function ProfileScreen() {
   const me = useMe(!!session);
   const activeHouseholdId = useActiveHousehold((s) => s.householdId);
   const setHouseholdId = useActiveHousehold((s) => s.setHouseholdId);
+  const householdDetail = useHouseholdDetail(activeHouseholdId);
+  const isOwner = !!session?.user?.id && householdDetail.data?.ownerId === session.user.id;
   const [testingPush, setTestingPush] = useState(false);
 
   const onTestPush = async () => {
@@ -173,6 +176,40 @@ export default function ProfileScreen() {
             Creer ou rejoindre un autre foyer
           </Button>
         </View>
+
+        {/* Configuration du foyer : reservee au proprietaire du foyer */}
+        {isOwner && (
+          <>
+            <Divider style={styles.divider} />
+            <View style={styles.section}>
+              <Text variant="labelLarge" style={styles.sectionTitle}>
+                Configuration du foyer
+              </Text>
+              <Surface
+                elevation={0}
+                style={[styles.linkRow, { backgroundColor: theme.colors.surface }]}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text variant="titleSmall" style={{ fontWeight: '700' }}>
+                    Semaine type
+                  </Text>
+                  <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
+                    Quels repas planifier chaque jour de la semaine.
+                  </Text>
+                </View>
+                <Button
+                  mode="text"
+                  compact
+                  icon="chevron-right"
+                  contentStyle={{ flexDirection: 'row-reverse' }}
+                  onPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
+                >
+                  Editer
+                </Button>
+              </Surface>
+            </View>
+          </>
+        )}
 
         <Divider style={styles.divider} />
 

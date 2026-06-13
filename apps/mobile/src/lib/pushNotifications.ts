@@ -7,15 +7,10 @@
  *     puis l'envoie au backend via /api/me/push-tokens.
  *  3. Au logout, on appelle `unregisterForPushNotifications` avec le token courant.
  *
- * Limitations :
- *  - Expo Go (SDK 53+) ne recoit plus les push notifications. On detecte ce
- *    cas via Constants.appOwnership === 'expo' et on skip silencieusement.
- *    Cette fonctionnalite necessite un Development Build ou un APK production
- *    (EAS Build).
- *  - On stocke le token courant en SecureStore pour pouvoir le retrouver au logout.
- *  - Les permissions iOS et Android se gerent via expo-notifications.
+ * Note : ce projet utilise un dev-client / production build (pas Expo Go),
+ * donc les push notifications fonctionnent normalement. On stocke le token
+ * courant en SecureStore pour pouvoir le retrouver au logout.
  */
-import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
@@ -23,14 +18,6 @@ import { Platform } from 'react-native';
 import { registerPushToken, unregisterPushToken } from './api';
 
 const SECURE_STORE_KEY = 'mealendar.expoPushToken';
-
-/**
- * Detecte si on tourne dans Expo Go (vs Development Build / APK production).
- * Dans Expo Go SDK 53+, les push remote notifications sont desactivees.
- */
-function isExpoGo(): boolean {
-  return Constants.appOwnership === 'expo';
-}
 
 /**
  * Configure le handler par defaut : on affiche les notifs quand l'app est au
@@ -51,19 +38,11 @@ export function configureNotificationHandler() {
 
 /**
  * Demande la permission, recupere un token Expo, et l'enregistre cote backend.
- * Retourne le token si succes, null sinon (refus, simulator, web, Expo Go, etc.).
+ * Retourne le token si succes, null sinon (refus, simulator, web, etc.).
  */
 export async function registerForPushNotifications(): Promise<string | null> {
   // Web : on saute (Expo Push ne supporte que iOS/Android)
   if (Platform.OS === 'web') return null;
-
-  // Expo Go SDK 53+ : les push remote sont desactivees, on skip silencieusement
-  // pour eviter le warning "expo-notifications: Android Push notifications [...]
-  // functionality was removed from Expo Go".
-  if (isExpoGo()) {
-    console.log('[push] Expo Go detected - push notifications disabled, skipping registration');
-    return null;
-  }
 
   // Simulator/Emulator : Expo Push ne fonctionne pas, mais on continue quand
   // meme pour permettre le dev (ca echouera silencieusement cote backend).

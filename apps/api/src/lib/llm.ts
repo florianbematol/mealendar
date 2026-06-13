@@ -620,3 +620,387 @@ export async function generatePlanningDraft(
 
   return { ...outcome, cacheHit: false };
 }
+
+// ============================================================================
+// Parse d'un plan alimentaire depuis une image (Gemini Vision)
+//
+// Gemini accepte des images via inline_data (base64). On lui demande de
+// retourner directement un JSON conforme a DietPlanSchema : un objet
+// { slots: { breakfast: [...], lunch: [...], ... }, dailyRules: [...] }.
+//
+// Strategie de robustesse : on accepte que le LLM produise des structures
+// imparfaites (ex. unite manquante, alternatives sans qty), le client les
+// affichera tel quel pour edition. La validation Zod cote API tolere les
+// champs optionnels.
+// ============================================================================
+
+const DIET_IMAGE_SYSTEM_PROMPT = `Tu es un assistant qui extrait des plans alimentaires depuis une image.
+On te fournit une image (photo / capture d'ecran) d'un plan alimentaire (typiquement une feuille remise par un dieteticien, ou un document imprime).
+Tu dois renvoyer UNIQUEMENT un JSON valide qui represente le plan en structure Mealendar.
+
+Schema attendu :
+{
+  "slots": {
+    "breakfast": [...] | undefined,
+    "lunch": [...] | undefined,
+    "snack": [...] | undefined,
+    "dinner": [...] | undefined
+  },
+  "dailyRules": [...],
+  "note": "..." | null,
+  "summary": "1-2 phrases qui decrivent ce qui a ete extrait",
+  "confidence": 0.0-1.0
+}
+
+Chaque element [...] est un "composant" :
+{
+  "id": "c-<3 chiffres aleatoires>",
+  "label": "Nom du composant en francais (ex: 'Proteine', 'Legumes', 'Feculents')",
+  "required": true,
+  "alternatives": [
+    {
+      "category": "<une valeur EXACTE de la liste ci-dessous>",
+      "label": "Nom de l'alternative en francais (ex: 'Viande', '2 oeufs', 'Pates')",
+      "qtyMin": number | null,
+      "qtyMax": number | null,
+      "unit": "g" | "ml" | "piece" | "c.a.s" | "c.a.c" | "portion" | null,
+      "note": "string courte" | null
+    }
+  ],
+  "note": "string courte" | null
+}
+
+CATEGORIES AUTORISEES (utilise UNIQUEMENT ces valeurs en francais sans accents pour le champ "category") :
+- "legumes"          (legumes verts, crudites, salade, ratatouille...)
+- "fruit"            (fruits frais, compote sans sucre)
+- "viande"           (boeuf, volaille, porc, agneau...)
+- "poisson"          (poisson, fruits de mer)
+- "oeuf"             (oeufs sous toutes formes)
+- "legumineuse"      (lentilles, pois chiches, haricots secs, tofu)
+- "feculent"         (pates, riz, semoule, pommes de terre, quinoa)
+- "pain"             (pain, biscottes)
+- "produit_laitier"  (yaourt, fromage blanc, lait, kefir)
+- "fromage"          (fromages a pate dure ou molle)
+- "fruits_a_coque"   (amandes, noix, noisettes...)
+- "matiere_grasse"   (huile, beurre, margarine)
+- "sucre"            (miel, confiture, sucre, chocolat noir)
+- "autre"            (boisson, eau, the, cafe, ou tout ce qui ne rentre pas ailleurs)
+
+NE JAMAIS utiliser de valeurs anglaises comme "protein", "carb", "dairy", "fat", "vegetable", "drink", "other". Mappe toujours vers les categories francaises ci-dessus.
+
+Regles :
+- Les slots: 'breakfast' (petit-dej), 'lunch' (dejeuner), 'snack' (gouter), 'dinner' (diner). N'invente pas de slot.
+- Les composants doivent etre orientes "Mealendar" : groupes logiques (Proteine, Legumes, Feculents, Matiere grasse, Produit laitier, Fruit, Boisson...).
+- Les "alternatives" sont les substituts equivalents pour ce composant (ex: "Viande 100g OU Poisson 150g OU 2 oeufs").
+- CHAQUE composant doit avoir un "id" string-unique court (ex: "c-001", "c-002") ET un tableau "alternatives" non vide. Meme dans dailyRules.
+- Les regles journalieres (huile, eau, etc.) vont dans dailyRules au format de composant complet (avec id, label, required, alternatives).
+- Si une info est ambigue ou illisible, mets-la quand meme avec une qty nulle plutot que de l'omettre.
+- Si tu ne reconnais aucun plan alimentaire dans l'image, renvoie { "slots": {}, "dailyRules": [], "summary": "Aucun plan alimentaire detecte", "confidence": 0 }.
+- N'inclus AUCUN texte hors du JSON. Pas de markdown, pas de \`\`\`json.`;
+
+type ParsedDietPlan = {
+  slots: Record<string, unknown>;
+  dailyRules: unknown[];
+  note?: string | null;
+  summary?: string;
+  confidence?: number;
+};
+
+/**
+ * Mapping des categories EN/synonymes -> categories FR du schema Mealendar.
+ * Le LLM produit parfois des termes anglais malgre le prompt ; on normalise.
+ */
+const CATEGORY_NORMALIZE: Record<string, string> = {
+  // anglais
+  protein: 'viande',
+  proteins: 'viande',
+  meat: 'viande',
+  fish: 'poisson',
+  egg: 'oeuf',
+  eggs: 'oeuf',
+  dairy: 'produit_laitier',
+  cheese: 'fromage',
+  vegetable: 'legumes',
+  vegetables: 'legumes',
+  veggie: 'legumes',
+  veggies: 'legumes',
+  fruit: 'fruit',
+  fruits: 'fruit',
+  carb: 'feculent',
+  carbs: 'feculent',
+  carbohydrate: 'feculent',
+  carbohydrates: 'feculent',
+  starch: 'feculent',
+  bread: 'pain',
+  legumineuses: 'legumineuse',
+  pulse: 'legumineuse',
+  pulses: 'legumineuse',
+  fat: 'matiere_grasse',
+  fats: 'matiere_grasse',
+  oil: 'matiere_grasse',
+  nut: 'fruits_a_coque',
+  nuts: 'fruits_a_coque',
+  sugar: 'sucre',
+  sweet: 'sucre',
+  drink: 'autre',
+  beverage: 'autre',
+  water: 'autre',
+  other: 'autre',
+  // FR variantes/typos
+  legume: 'legumes',
+  produit_laitiers: 'produit_laitier',
+  produits_laitiers: 'produit_laitier',
+  matieres_grasses: 'matiere_grasse',
+};
+
+const VALID_CATEGORIES = new Set([
+  'legumes',
+  'fruit',
+  'viande',
+  'poisson',
+  'oeuf',
+  'legumineuse',
+  'feculent',
+  'pain',
+  'produit_laitier',
+  'fromage',
+  'fruits_a_coque',
+  'matiere_grasse',
+  'sucre',
+  'autre',
+]);
+
+function normalizeCategory(raw: unknown): string {
+  if (typeof raw !== 'string') return 'autre';
+  const lower = raw.trim().toLowerCase();
+  if (VALID_CATEGORIES.has(lower)) return lower;
+  return CATEGORY_NORMALIZE[lower] ?? 'autre';
+}
+
+/**
+ * Nettoie un label en lui retirant les preffixes/suffixes de quantite
+ * que le LLM colle parfois dedans :
+ *  - "50g de pain"      -> "pain"
+ *  - "100-150g viande"  -> "viande"
+ *  - "2 oeufs"          -> "oeufs"
+ *  - "Pates 80g"        -> "Pates"
+ *
+ * Si le label devient vide apres nettoyage, on garde l'original (pour ne
+ * pas perdre l'info).
+ */
+function cleanQtyFromLabel(label: string): string {
+  let cleaned = label.trim();
+  // Pattern debut : "<num>[-<num>]?<unit>(de )?"
+  // Ex : "50g de ", "100-150g ", "2 ", "200ml "
+  const prefixRe =
+    /^(\d+(?:[.,]\d+)?(?:\s*[-\u2013]\s*\d+(?:[.,]\d+)?)?\s*(?:g|kg|ml|cl|l|mg|piece|pieces|portion|portions|c\.?\s*a\.?\s*s|c\.?\s*a\.?\s*c|cas|cac)\s*(?:de\s+|d['\u2019])?)/i;
+  cleaned = cleaned.replace(prefixRe, '');
+  // Pattern fin (au cas ou le LLM mette la qty apres) : " <num><unit>"
+  const suffixRe =
+    /\s+(\d+(?:[.,]\d+)?(?:\s*[-\u2013]\s*\d+(?:[.,]\d+)?)?\s*(?:g|kg|ml|cl|l|mg|piece|pieces|portion|portions|c\.?\s*a\.?\s*s|c\.?\s*a\.?\s*c|cas|cac))$/i;
+  cleaned = cleaned.replace(suffixRe, '');
+  cleaned = cleaned.trim();
+  if (!cleaned) return label.trim();
+  // Capitalise la 1ere lettre
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+/**
+ * Normalise un composant tel que renvoye par le LLM :
+ *  - genere un id si absent
+ *  - garantit un tableau alternatives (au minimum vide)
+ *  - normalise category (EN -> FR)
+ *  - force required a true par defaut
+ */
+function normalizeComponent(raw: unknown, fallbackIdPrefix: string, idx: number): unknown {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: `${fallbackIdPrefix}-${idx}`,
+      label: 'Sans titre',
+      required: true,
+      alternatives: [],
+    };
+  }
+  const c = raw as Record<string, unknown>;
+  const altsRaw = Array.isArray(c.alternatives) ? c.alternatives : [];
+  const alternatives = altsRaw.map((a) => {
+    if (!a || typeof a !== 'object') return { category: 'autre', label: 'Sans titre' };
+    const ar = a as Record<string, unknown>;
+    const rawLabel = typeof ar.label === 'string' && ar.label.trim() ? ar.label : 'Sans titre';
+    return {
+      ...ar,
+      category: normalizeCategory(ar.category),
+      // Nettoie les quantites collees dans le label par le LLM (ex "50g de pain")
+      label: cleanQtyFromLabel(rawLabel),
+    };
+  });
+  const compLabel = typeof c.label === 'string' && c.label.trim() ? c.label : 'Sans titre';
+  return {
+    ...c,
+    id: typeof c.id === 'string' && c.id.trim() ? c.id : `${fallbackIdPrefix}-${idx}`,
+    label: cleanQtyFromLabel(compLabel),
+    required: typeof c.required === 'boolean' ? c.required : true,
+    alternatives:
+      alternatives.length > 0
+        ? alternatives
+        : [
+            {
+              category: 'autre',
+              label: cleanQtyFromLabel(compLabel === 'Sans titre' ? 'Element' : compLabel),
+            },
+          ],
+  };
+}
+
+/**
+ * Normalise tout le DietPlan extrait : applique normalizeComponent sur
+ * chaque slot et chaque dailyRule. Retourne un objet pret pour la
+ * validation Zod.
+ */
+export function normalizeParsedDietPlan(parsed: ParsedDietPlan): {
+  slots: Record<string, unknown[]>;
+  dailyRules: unknown[];
+  note?: string | null;
+} {
+  const slots: Record<string, unknown[]> = {};
+  for (const [key, comps] of Object.entries(parsed.slots ?? {})) {
+    if (!Array.isArray(comps)) continue;
+    slots[key] = comps.map((c, i) => normalizeComponent(c, `s-${key}`, i));
+  }
+  const dailyRules = (parsed.dailyRules ?? []).map((c, i) => normalizeComponent(c, 'd', i));
+  return {
+    slots,
+    dailyRules,
+    note: parsed.note ?? null,
+  };
+}
+
+/**
+ * Appel Gemini Vision pour extraire un plan alimentaire depuis une image.
+ */
+async function callGeminiVisionDietPlan(
+  apiKey: string,
+  imageBase64: string,
+  mimeType: string,
+  hint: string | undefined,
+): Promise<{ parsed: ParsedDietPlan; tokensIn?: number; tokensOut?: number; model: string }> {
+  const model = 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const userText = hint
+    ? `Voici une image de plan alimentaire. Indication : ${hint.trim()}`
+    : 'Voici une image de plan alimentaire. Extrais-le.';
+
+  const body = {
+    systemInstruction: {
+      role: 'system',
+      parts: [{ text: DIET_IMAGE_SYSTEM_PROMPT }],
+    },
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: userText }, { inline_data: { mime_type: mimeType, data: imageBase64 } }],
+      },
+    ],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: 'application/json',
+    },
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Gemini ${res.status}: ${text.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  };
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+  let parsed: ParsedDietPlan;
+  try {
+    parsed = JSON.parse(text) as ParsedDietPlan;
+  } catch (e) {
+    throw new Error(`Gemini returned invalid JSON: ${(e as Error).message}`);
+  }
+  return {
+    parsed,
+    tokensIn: data.usageMetadata?.promptTokenCount,
+    tokensOut: data.usageMetadata?.candidatesTokenCount,
+    model,
+  };
+}
+
+export type ParseDietPlanContext = {
+  imageBase64: string;
+  mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
+  hint?: string;
+};
+
+export type ParseDietPlanOutcome = {
+  parsed: ParsedDietPlan;
+  cacheHit: boolean;
+  model: string;
+  tokensIn?: number;
+  tokensOut?: number;
+};
+
+const DIET_IMAGE_CACHE_TTL_S = 60 * 60 * 24 * 30; // 30 jours
+
+/**
+ * Parse un plan alimentaire depuis une image. Utilise Gemini Vision en
+ * priorite ; si non configure, throw LlmNotConfiguredError.
+ *
+ * Cache : SHA-256 de (imageBase64 + hint), TTL 30 jours.
+ */
+export async function parseDietPlanFromImage(
+  ctx: ParseDietPlanContext,
+  env: { GEMINI_API_KEY?: string; GROQ_API_KEY?: string; CACHE?: KVNamespace },
+): Promise<ParseDietPlanOutcome> {
+  // Cache key : hash de (image + hint). On evite de mettre la base64 entiere
+  // dans la cle (longueur explosive), on hash.
+  let cacheKey: string | null = null;
+  if (env.CACHE) {
+    const { sha256Hex } = await import('./hash');
+    const hint = ctx.hint?.trim() ?? '';
+    cacheKey = `diet-img:${await sha256Hex(`${ctx.imageBase64.length}:${ctx.imageBase64.slice(0, 200)}${ctx.imageBase64.slice(-200)}:${hint}`)}`;
+    const cached = await env.CACHE.get(cacheKey);
+    if (cached) {
+      return {
+        parsed: JSON.parse(cached) as ParsedDietPlan,
+        cacheHit: true,
+        model: 'cache',
+      };
+    }
+  }
+
+  if (!env.GEMINI_API_KEY) {
+    throw new LlmNotConfiguredError();
+  }
+
+  const outcome = await callGeminiVisionDietPlan(
+    env.GEMINI_API_KEY,
+    ctx.imageBase64,
+    ctx.mimeType,
+    ctx.hint,
+  );
+
+  if (cacheKey && env.CACHE) {
+    await env.CACHE.put(cacheKey, JSON.stringify(outcome.parsed), {
+      expirationTtl: DIET_IMAGE_CACHE_TTL_S,
+    });
+  }
+
+  return {
+    parsed: outcome.parsed,
+    cacheHit: false,
+    model: outcome.model,
+    tokensIn: outcome.tokensIn,
+    tokensOut: outcome.tokensOut,
+  };
+}

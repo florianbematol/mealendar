@@ -1,594 +1,277 @@
-import { EmptyState } from '@/components/EmptyState';
+import { MonthCalendar } from '@/components/MonthCalendar';
+import { MonthYearPicker } from '@/components/MonthYearPicker';
 import { Topbar } from '@/components/Topbar';
-import { useMyDietPlan } from '@/hooks/useDietPlans';
-import { useCreatePlanning, useMealPlan, usePlannings } from '@/hooks/usePlannings';
-import { ApiError } from '@/lib/api';
-import { addDays, formatShortDate, startOfWeek, todayIso } from '@/lib/dates';
+import { useMealPlanRanges } from '@/hooks/usePlannings';
+import { addMonths, formatLongDate, formatMonthYear } from '@/lib/dates';
 import { useActiveHousehold } from '@/stores/activeHousehold';
-import type { Planning } from '@mealendar/shared';
+import type { MealPlanRange } from '@mealendar/shared';
+import dayjs from 'dayjs';
 import { router } from 'expo-router';
-import { useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Button,
-  Chip,
-  HelperText,
-  IconButton,
-  Surface,
-  Text,
-  TouchableRipple,
-  useTheme,
-} from 'react-native-paper';
-import { SafeAreaView } from 'react-native-safe-area-context';
+  Animated,
+  Dimensions,
+  PanResponder,
+  StyleSheet,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { Button, Text, useTheme } from 'react-native-paper';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+/**
+ * Page Planning : calendrier mois custom (style FamilyWall).
+ *
+ * - Grille pleine hauteur, bandes nommees pour les plages.
+ * - Slide gauche/droite pour changer de mois (carousel 3 mois + PanResponder).
+ * - Tap nom du mois : selecteur mois/annee en pur JS (MonthYearPicker).
+ * - Tap sur un jour : si dans une plage -> ouvre la plage ; sinon -> ouvre la
+ *   vue range avec ce seul jour (les dates s'ajustent sur cet ecran).
+ */
 export default function PlanningIndexScreen() {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = 56 + Math.max(insets.bottom, 8);
+  const screenW = Dimensions.get('window').width;
+
   const householdId = useActiveHousehold((s) => s.householdId);
-  const plannings = usePlannings(householdId);
-  const mealPlan = useMealPlan(householdId);
-  // Le diet plan est PERSONNEL depuis Phase 5.5 : on regarde le profil du
-  // user courant via useMyDietPlan, plus mealPlan.data?.dietPlan (deprecated).
-  const myDietPlan = useMyDietPlan(householdId);
-  const createPlanning = useCreatePlanning();
-  const [error, setError] = useState<string | null>(null);
+  const ranges = useMealPlanRanges(householdId);
 
-  // Resume du plan-type : nb de slots configures sur la semaine
-  const slotsPerWeek = mealPlan.data
-    ? Object.values(mealPlan.data.slotConfig).reduce(
-        (acc, daySlots) => acc + (daySlots?.length ?? 0),
-        0,
-      )
-    : 0;
+  // ---------------------------------------------------------------------------
+  // Modele du carousel : un mois de base STABLE + un offset entier.
+  //   mois affiche = addMonths(baseMonth, offset)
+  // On rend une fenetre de (2*WINDOW+1) mois autour de l'offset, tous montes
+  // a l'avance (positionnes en absolu), pour eviter tout lag au slide.
+  // ---------------------------------------------------------------------------
+  const WINDOW = 3; // nombre de mois pre-rendus de chaque cote
+  const currentMonth = dayjs().date(1).format('YYYY-MM-DD');
+  const baseMonth = useRef(currentMonth).current; // jamais reconstruit
+  const [offset, setOffset] = useState(0);
 
-  // Considere le diet plan configure si :
-  //  - une entree user_diet_plans existe pour ce user dans ce foyer ET
-  //  - elle a au moins un signal (regimes / allergies / goals / composants slot)
-  const dietPlanConfigured =
-    !!myDietPlan.data &&
-    (myDietPlan.data.regimes.length > 0 ||
-      myDietPlan.data.allergies.length > 0 ||
-      myDietPlan.data.goals.length > 0 ||
-      Object.values(myDietPlan.data.dietPlan.slots).some((s) => (s ?? []).length > 0));
+  const month = addMonths(baseMonth, offset);
+  const isCurrentMonth = month === currentMonth;
 
-  // Resume du plan alimentaire : nb de composants au total + nb de regles journalieres
-  const dietComponentsCount = myDietPlan.data
-    ? Object.values(myDietPlan.data.dietPlan.slots).reduce(
-        (acc, comps) => acc + (comps?.length ?? 0),
-        0,
-      )
-    : 0;
-  const dietRulesCount = myDietPlan.data?.dietPlan?.dailyRules?.length ?? 0;
+  const [showPicker, setShowPicker] = useState(false);
 
-  const onCreateThisWeek = async () => {
-    if (!householdId) return;
-    setError(null);
-    const start = startOfWeek(todayIso());
-    const end = addDays(start, 6);
-    try {
-      const p = await createPlanning.mutateAsync({
-        householdId,
-        startDate: start,
-        endDate: end,
-        mealPlanId: mealPlan.data?.id ?? null,
-        name: `Semaine du ${formatShortDate(start)}`,
-      });
-      router.push(`/(app)/(tabs)/planning/${p.id}`);
-    } catch (e) {
-      if (e instanceof ApiError) setError(`${e.status} - ${e.message}`);
-      else setError(e instanceof Error ? e.message : 'Erreur inconnue');
+  // Selection d'une plage sur la grille : 1er tap = debut, 2e tap = fin.
+  // null = pas de selection en cours.
+  const [selStart, setSelStart] = useState<string | null>(null);
+
+  /** Map date -> plage existante (tap -> ouvrir la bonne vue). */
+  const rangeForDate = useMemo(() => {
+    const map = new Map<string, MealPlanRange>();
+    for (const r of ranges.data ?? []) {
+      let cur = r.dateFrom;
+      while (cur <= r.dateTo) {
+        if (!map.has(cur)) map.set(cur, r);
+        cur = dayjs(cur).add(1, 'day').format('YYYY-MM-DD');
+      }
     }
+    return map;
+  }, [ranges.data]);
+
+  const openRange = (from: string, to: string) => {
+    setSelStart(null);
+    router.push(`/(app)/(tabs)/planning/range/${from}/${to}`);
   };
+
+  const onDayPress = (date: string) => {
+    // Mode selection en cours : ce tap fixe la fin de la plage.
+    if (selStart) {
+      const [from, to] = selStart <= date ? [selStart, date] : [date, selStart];
+      openRange(from, to);
+      return;
+    }
+    // Jour dans une plage existante -> ouvre cette plage directement.
+    const existing = rangeForDate.get(date);
+    if (existing) {
+      openRange(existing.dateFrom, existing.dateTo);
+      return;
+    }
+    // Jour hors plage -> demarre une selection (debut). Le 2e tap fixera la fin.
+    setSelStart(date);
+  };
+
+  const cancelSelection = () => setSelStart(null);
+
+  // ---------------------------------------------------------------------------
+  // Slide horizontal entre mois (Animated natif, sans reanimated)
+  // translateX represente le decalage du "ruban" : au repos il vaut
+  // -offset * screenW (le mois courant est centre dans le viewport).
+  // ---------------------------------------------------------------------------
+  const translateX = useRef(new Animated.Value(0)).current;
+  const isAnimating = useRef(false);
+  // offset courant accessible dans les closures du PanResponder (qui est memo).
+  const offsetRef = useRef(0);
+  offsetRef.current = offset;
+
+  // Recentre le ruban sur l'offset donne (instantane).
+  const recenter = (o: number) => {
+    translateX.setValue(-o * screenW);
+  };
+
+  const goToMonth = (newOffset: number) => {
+    setOffset(newOffset);
+    recenter(newOffset);
+  };
+
+  /** Revient au mois courant. */
+  const goToToday = () => goToMonth(0);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refs stables, recree seulement sur changement de largeur
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) =>
+          Math.abs(g.dx) > 12 && Math.abs(g.dx) > Math.abs(g.dy) * 1.4,
+        onPanResponderMove: (_, g) => {
+          if (isAnimating.current) return;
+          translateX.setValue(-offsetRef.current * screenW + g.dx);
+        },
+        onPanResponderRelease: (_, g) => {
+          if (isAnimating.current) return;
+          const threshold = screenW * 0.25;
+          const cur = offsetRef.current;
+          const settle = (next: number) => {
+            isAnimating.current = true;
+            Animated.timing(translateX, {
+              toValue: -next * screenW,
+              duration: 200,
+              useNativeDriver: true,
+            }).start(() => {
+              isAnimating.current = false;
+              if (next !== cur) setOffset(next);
+            });
+          };
+          if (g.dx > threshold) settle(cur - 1);
+          else if (g.dx < -threshold) settle(cur + 1);
+          else settle(cur);
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [screenW],
+  );
+
+  const onPickerConfirm = (isoMonth: string) => {
+    // Convertit le mois choisi en offset par rapport au baseMonth stable.
+    const diff = dayjs(isoMonth).diff(dayjs(baseMonth), 'month');
+    goToMonth(diff);
+    setShowPicker(false);
+  };
+
+  const allRanges = ranges.data ?? [];
 
   return (
     <SafeAreaView
       style={[styles.safe, { backgroundColor: theme.colors.background }]}
       edges={['top']}
     >
-      <Topbar
-        right={
-          <IconButton
-            icon="cog-outline"
-            size={22}
-            onPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
-            iconColor={theme.colors.onSurfaceVariant}
-          />
-        }
+      <Topbar />
+
+      <View style={[styles.container, { paddingBottom: tabBarHeight }]}>
+        {/* Header : nom du mois (cliquable -> picker) + bouton Aujourd'hui */}
+        <View style={styles.headerRow}>
+          <TouchableOpacity onPress={() => setShowPicker(true)} activeOpacity={0.6}>
+            <Text variant="headlineSmall" style={styles.monthTitle}>
+              {formatMonthYear(month)}
+            </Text>
+          </TouchableOpacity>
+          <View style={styles.headerActions}>
+            <Button
+              mode="text"
+              compact
+              onPress={goToToday}
+              icon="calendar-today"
+              disabled={isCurrentMonth}
+              style={styles.todayBtn}
+              labelStyle={styles.todayBtnLabel}
+            >
+              Aujourd'hui
+            </Button>
+          </View>
+        </View>
+
+        {/* Bandeau de selection : visible apres le 1er tap, en attente du 2e. */}
+        {selStart && (
+          <View style={[styles.selBanner, { backgroundColor: theme.colors.primaryContainer }]}>
+            <Text
+              style={[styles.selBannerText, { color: theme.colors.onPrimaryContainer }]}
+              numberOfLines={1}
+            >
+              Debut : {formatLongDate(selStart)} — choisissez la fin
+            </Text>
+            <Button mode="text" compact onPress={cancelSelection} labelStyle={styles.selBannerBtn}>
+              Annuler
+            </Button>
+          </View>
+        )}
+
+        {/* Ruban de mois pre-rendus (fenetre -WINDOW..+WINDOW autour de l'offset).
+            Chaque mois est positionne en absolu a left = slideOffset * screenW ;
+            le ruban est translate pour centrer l'offset courant. Les voisins
+            sont deja montes -> aucun lag au slide. */}
+        <View style={styles.carouselViewport} {...panResponder.panHandlers}>
+          <Animated.View style={[styles.carousel, { transform: [{ translateX }] }]}>
+            {Array.from({ length: WINDOW * 2 + 1 }, (_, i) => {
+              const slideOffset = offset - WINDOW + i;
+              return (
+                <View
+                  key={slideOffset}
+                  style={[styles.slide, { left: slideOffset * screenW, width: screenW }]}
+                >
+                  <MonthCalendar
+                    month={addMonths(baseMonth, slideOffset)}
+                    ranges={allRanges}
+                    width={screenW}
+                    onDayPress={onDayPress}
+                    selStart={selStart}
+                  />
+                </View>
+              );
+            })}
+          </Animated.View>
+        </View>
+      </View>
+
+      <MonthYearPicker
+        visible={showPicker}
+        value={month}
+        onConfirm={onPickerConfirm}
+        onDismiss={() => setShowPicker(false)}
       />
-
-      <ScrollView
-        contentContainerStyle={styles.container}
-        refreshControl={
-          <RefreshControl
-            refreshing={plannings.isFetching && !plannings.isPending}
-            onRefresh={() => {
-              void plannings.refetch();
-              void mealPlan.refetch();
-            }}
-            tintColor={theme.colors.primary}
-          />
-        }
-      >
-        <View style={styles.header}>
-          <Text variant="titleLarge" style={styles.title}>
-            Planning
-          </Text>
-          <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-            Composez votre semaine ou laissez la magie operer.
-          </Text>
-        </View>
-
-        {/* Setup section : etat de configuration du foyer */}
-        <SetupSection
-          mealPlanConfigured={!!mealPlan.data}
-          dietPlanConfigured={dietPlanConfigured}
-          mealPlanSummary={mealPlan.data ? `${slotsPerWeek} repas / semaine` : null}
-          dietPlanSummary={
-            dietPlanConfigured
-              ? `${dietComponentsCount} composant${dietComponentsCount > 1 ? 's' : ''}${
-                  dietRulesCount > 0
-                    ? ` · ${dietRulesCount} regle${dietRulesCount > 1 ? 's' : ''}`
-                    : ''
-                }`
-              : null
-          }
-          onMealPlanPress={() => router.push('/(app)/(tabs)/planning/meal-plan')}
-          onDietPlanPress={() => router.push('/(app)/(tabs)/planning/diet-plan')}
-        />
-
-        {/* Action principale */}
-        <Button
-          mode="contained"
-          icon="calendar-plus"
-          onPress={onCreateThisWeek}
-          loading={createPlanning.isPending}
-          disabled={createPlanning.isPending}
-          style={styles.createBtn}
-          contentStyle={styles.createBtnContent}
-        >
-          Nouveau planning - Cette semaine
-        </Button>
-
-        {error && (
-          <HelperText type="error" visible>
-            {error}
-          </HelperText>
-        )}
-
-        {/* Liste des plannings existants */}
-        <View style={styles.listSection}>
-          <Text variant="labelLarge" style={styles.sectionTitle}>
-            Mes plannings
-          </Text>
-          {plannings.isPending && (
-            <View style={styles.loaderRow}>
-              <ActivityIndicator size="small" color={theme.colors.primary} />
-            </View>
-          )}
-          {plannings.isSuccess && plannings.data.length === 0 && (
-            <EmptyState
-              icon="calendar-blank"
-              title="Pas encore de planning"
-              description="Creez votre premier planning pour la semaine et generez automatiquement les repas a partir de vos recettes."
-              cta={{
-                label: 'Creer cette semaine',
-                icon: 'calendar-plus',
-                onPress: onCreateThisWeek,
-              }}
-            />
-          )}
-          {plannings.isSuccess &&
-            plannings.data.map((p) => <PlanningRow key={p.id} planning={p} />)}
-        </View>
-      </ScrollView>
     </SafeAreaView>
-  );
-}
-
-// ============================================================================
-// SetupSection : etat de configuration du foyer (semaine type + plan alimentaire)
-//
-// 2 modes selon l'etat :
-//  - "fresh" (rien configure) : grand encart accueillant avec checklist visuelle
-//                                qui guide l'utilisateur dans le setup
-//  - "ready" (semaine type OK) : ligne discrete avec resumes et lien Modifier
-// ============================================================================
-function SetupSection({
-  mealPlanConfigured,
-  dietPlanConfigured,
-  mealPlanSummary,
-  dietPlanSummary,
-  onMealPlanPress,
-  onDietPlanPress,
-}: {
-  mealPlanConfigured: boolean;
-  dietPlanConfigured: boolean;
-  mealPlanSummary: string | null;
-  dietPlanSummary: string | null;
-  onMealPlanPress: () => void;
-  onDietPlanPress: () => void;
-}) {
-  const theme = useTheme();
-
-  // Compact : tout est configure -> ligne discrete avec 2 chips et acces Modifier
-  if (mealPlanConfigured && dietPlanConfigured) {
-    return (
-      <Surface
-        elevation={0}
-        style={[styles.compactCard, { backgroundColor: theme.colors.surface }]}
-      >
-        <View style={styles.compactRow}>
-          <View style={styles.compactItem}>
-            <Text
-              variant="labelSmall"
-              style={[styles.compactLabel, { color: theme.colors.onSurfaceVariant }]}
-            >
-              Semaine type
-            </Text>
-            <Text variant="bodyMedium" style={styles.compactValue}>
-              {mealPlanSummary}
-            </Text>
-          </View>
-          <View style={[styles.compactDivider, { backgroundColor: theme.colors.outlineVariant }]} />
-          <View style={styles.compactItem}>
-            <Text
-              variant="labelSmall"
-              style={[styles.compactLabel, { color: theme.colors.onSurfaceVariant }]}
-            >
-              Plan alimentaire
-            </Text>
-            <Text variant="bodyMedium" style={styles.compactValue}>
-              {dietPlanSummary}
-            </Text>
-          </View>
-          <IconButton
-            icon="cog-outline"
-            size={20}
-            onPress={onMealPlanPress}
-            iconColor={theme.colors.onSurfaceVariant}
-            style={styles.compactCog}
-          />
-        </View>
-        <View style={styles.compactActions}>
-          <Button mode="text" compact onPress={onMealPlanPress}>
-            Semaine type
-          </Button>
-          <Button mode="text" compact onPress={onDietPlanPress}>
-            Plan alimentaire
-          </Button>
-        </View>
-      </Surface>
-    );
-  }
-
-  // Fresh : checklist guidante
-  const totalSteps = 2;
-  const doneSteps = (mealPlanConfigured ? 1 : 0) + (dietPlanConfigured ? 1 : 0);
-  const progressPct = (doneSteps / totalSteps) * 100;
-
-  return (
-    <Surface elevation={0} style={[styles.setupCard, { backgroundColor: theme.colors.surface }]}>
-      <View style={styles.setupHeader}>
-        <View style={{ flex: 1 }}>
-          <Text variant="titleMedium" style={styles.setupTitle}>
-            Configurez votre foyer
-          </Text>
-          <Text
-            variant="bodySmall"
-            style={[styles.setupSubtitle, { color: theme.colors.onSurfaceVariant }]}
-          >
-            Definissez votre rythme de repas pour generer des plannings adaptes.
-          </Text>
-        </View>
-        <View style={styles.setupProgressBlock}>
-          <Text
-            variant="labelMedium"
-            style={[styles.setupProgressText, { color: theme.colors.primary }]}
-          >
-            {doneSteps}/{totalSteps}
-          </Text>
-        </View>
-      </View>
-
-      <View style={[styles.progressBar, { backgroundColor: theme.colors.surfaceVariant }]}>
-        <View
-          style={[
-            styles.progressBarFill,
-            { width: `${progressPct}%`, backgroundColor: theme.colors.primary },
-          ]}
-        />
-      </View>
-
-      <View style={styles.stepsList}>
-        <SetupStep
-          icon="calendar-week"
-          title="Semaine type"
-          description={
-            mealPlanConfigured
-              ? (mealPlanSummary ?? 'Configure')
-              : 'Quels repas planifier chaque jour de la semaine ?'
-          }
-          done={mealPlanConfigured}
-          required
-          onPress={onMealPlanPress}
-        />
-        <SetupStep
-          icon="leaf"
-          title="Plan alimentaire"
-          description={
-            dietPlanConfigured
-              ? (dietPlanSummary ?? 'Configure')
-              : 'Composants attendus dans chaque repas (legumes, proteine, feculents...)'
-          }
-          done={dietPlanConfigured}
-          required={false}
-          locked={!mealPlanConfigured}
-          onPress={onDietPlanPress}
-        />
-      </View>
-    </Surface>
-  );
-}
-
-function SetupStep({
-  icon,
-  title,
-  description,
-  done,
-  required,
-  locked,
-  onPress,
-}: {
-  icon: string;
-  title: string;
-  description: string;
-  done: boolean;
-  required: boolean;
-  locked?: boolean;
-  onPress: () => void;
-}) {
-  const theme = useTheme();
-  const bubbleColor = done
-    ? theme.colors.primary
-    : locked
-      ? theme.colors.surfaceVariant
-      : theme.colors.primaryContainer;
-  const iconColor = done
-    ? theme.colors.onPrimary
-    : locked
-      ? theme.colors.onSurfaceVariant
-      : theme.colors.primary;
-
-  return (
-    <TouchableRipple
-      onPress={locked ? undefined : onPress}
-      disabled={locked}
-      borderless
-      style={[styles.step, locked && styles.stepLocked]}
-    >
-      <View style={styles.stepInner}>
-        <View style={[styles.stepBubble, { backgroundColor: bubbleColor }]}>
-          {done ? (
-            <Text style={[styles.stepCheck, { color: iconColor }]}>✓</Text>
-          ) : (
-            <IconButton
-              icon={locked ? 'lock-outline' : icon}
-              size={18}
-              iconColor={iconColor}
-              style={styles.stepBubbleIcon}
-              disabled
-            />
-          )}
-        </View>
-        <View style={styles.stepBody}>
-          <View style={styles.stepTitleRow}>
-            <Text variant="titleSmall" style={styles.stepTitle}>
-              {title}
-            </Text>
-            {!required && !done && (
-              <Text
-                variant="labelSmall"
-                style={[styles.stepBadge, { color: theme.colors.onSurfaceVariant }]}
-              >
-                Optionnel
-              </Text>
-            )}
-            {done && (
-              <Text
-                variant="labelSmall"
-                style={[styles.stepBadge, { color: theme.colors.primary, fontWeight: '700' }]}
-              >
-                Pret
-              </Text>
-            )}
-          </View>
-          <Text
-            variant="bodySmall"
-            numberOfLines={2}
-            style={{ color: theme.colors.onSurfaceVariant, marginTop: 2 }}
-          >
-            {description}
-          </Text>
-        </View>
-        {!locked && (
-          <Text style={[styles.stepChevron, { color: theme.colors.onSurfaceVariant }]}>›</Text>
-        )}
-      </View>
-    </TouchableRipple>
-  );
-}
-
-function PlanningRow({ planning }: { planning: Planning }) {
-  const theme = useTheme();
-  return (
-    <TouchableRipple
-      onPress={() => router.push(`/(app)/(tabs)/planning/${planning.id}`)}
-      borderless
-      style={[styles.planningRow, { backgroundColor: theme.colors.surface }]}
-    >
-      <View style={styles.planningRowInner}>
-        <Surface
-          elevation={0}
-          style={[styles.planningThumb, { backgroundColor: theme.colors.primaryContainer }]}
-        >
-          <Text style={styles.planningEmoji}>📆</Text>
-        </Surface>
-        <View style={{ flex: 1 }}>
-          <Text variant="titleMedium" style={styles.planningName} numberOfLines={1}>
-            {planning.name}
-          </Text>
-          <Text variant="bodySmall" style={{ color: theme.colors.onSurfaceVariant }}>
-            {formatShortDate(planning.startDate)} → {formatShortDate(planning.endDate)}
-          </Text>
-        </View>
-        <Chip
-          compact
-          style={{
-            backgroundColor:
-              planning.status === 'active'
-                ? theme.colors.primaryContainer
-                : theme.colors.surfaceVariant,
-          }}
-          textStyle={styles.statusChipText}
-        >
-          {planning.status === 'active' ? 'Actif' : planning.status}
-        </Chip>
-      </View>
-    </TouchableRipple>
   );
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: {
-    padding: 16,
-    gap: 16,
-    paddingBottom: 32,
+  container: { flex: 1 },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 4,
   },
-  header: { gap: 2, paddingTop: 4 },
-  title: { fontWeight: '700' },
-  createBtn: {
+  monthTitle: { fontWeight: '800' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  todayBtn: { marginRight: -4 },
+  todayBtnLabel: { fontSize: 13, marginVertical: 0 },
+  selBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: 12,
+    marginBottom: 4,
+    paddingLeft: 12,
+    paddingRight: 4,
     borderRadius: 12,
   },
-  createBtnContent: { paddingVertical: 6 },
-  listSection: { gap: 8 },
-  sectionTitle: { fontWeight: '700', letterSpacing: 0.3 },
-  empty: {
-    padding: 24,
-    borderRadius: 16,
-    alignItems: 'center',
-  },
-  emptyEmoji: { fontSize: 36, marginBottom: 8 },
-  emptyTitle: { fontWeight: '700' },
-  emptyBody: { textAlign: 'center', marginTop: 4 },
-  loaderRow: { padding: 16, alignItems: 'center' },
-  planningRow: {
-    padding: 12,
-    borderRadius: 14,
-    marginBottom: 8,
-  },
-  planningRowInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  planningThumb: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  planningEmoji: { fontSize: 22 },
-  planningName: { fontWeight: '700' },
-  statusChipText: { fontSize: 11 },
-
-  // SetupSection - mode "fresh"
-  setupCard: {
-    padding: 16,
-    borderRadius: 18,
-    gap: 12,
-  },
-  setupHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  setupTitle: { fontWeight: '700' },
-  setupSubtitle: { marginTop: 4, lineHeight: 18 },
-  setupProgressBlock: {
-    minWidth: 36,
-    alignItems: 'flex-end',
-  },
-  setupProgressText: { fontWeight: '800', fontSize: 14 },
-  progressBar: {
-    height: 6,
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  progressBarFill: {
-    height: '100%',
-    borderRadius: 3,
-  },
-  stepsList: { gap: 4, marginTop: 4 },
-  step: {
-    borderRadius: 12,
-  },
-  stepLocked: { opacity: 0.55 },
-  stepInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 4,
-  },
-  stepBubble: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stepBubbleIcon: { margin: 0 },
-  stepCheck: { fontSize: 18, fontWeight: '800' },
-  stepBody: { flex: 1 },
-  stepTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  stepTitle: { fontWeight: '700' },
-  stepBadge: {
-    fontSize: 10,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  stepChevron: { fontSize: 22, lineHeight: 22, paddingHorizontal: 4 },
-
-  // SetupSection - mode "compact" (tout configure)
-  compactCard: {
-    padding: 14,
-    borderRadius: 16,
-    gap: 8,
-  },
-  compactRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  compactItem: { flex: 1 },
-  compactLabel: {
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-    fontSize: 10,
-  },
-  compactValue: { fontWeight: '700', marginTop: 2 },
-  compactDivider: { width: 1, height: 32 },
-  compactCog: { margin: 0 },
-  compactActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 4,
-    marginTop: 4,
-  },
+  selBannerText: { flex: 1, fontSize: 13, fontWeight: '600' },
+  selBannerBtn: { fontSize: 13, marginVertical: 4 },
+  // Le viewport masque les mois hors ecran.
+  carouselViewport: { flex: 1, overflow: 'hidden' },
+  // Le ruban occupe tout le viewport ; les slides sont positionnes en absolu.
+  carousel: { flex: 1 },
+  slide: { position: 'absolute', top: 0, bottom: 0 },
 });
