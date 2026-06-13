@@ -694,12 +694,32 @@ export default function PlanningDayScreen() {
           )}
           <Dialog.ScrollArea style={{ maxHeight: 360 }}>
             <ScrollView>
-              {(recipes.data?.items ?? []).length === 0 ? (
-                <Text style={{ paddingVertical: 16 }}>
-                  Aucune recette dans la bibliotheque. Creez-en avant de planifier.
-                </Text>
-              ) : (
-                (recipes.data?.items ?? []).map((r) => (
+              {(() => {
+                // Filtre par slot : recettes taguees pour le slot cible + celles
+                // sans aucun tag (passe-partout). On cache celles taguees
+                // uniquement pour d'autres slots.
+                const slotKey = pickerTarget?.slotKey;
+                const filtered = (recipes.data?.items ?? []).filter((r) => {
+                  if (!slotKey) return true;
+                  if (r.mealSlots.length === 0) return true;
+                  return r.mealSlots.includes(slotKey);
+                });
+                if ((recipes.data?.items ?? []).length === 0) {
+                  return (
+                    <Text style={{ paddingVertical: 16 }}>
+                      Aucune recette dans la bibliotheque. Creez-en avant de planifier.
+                    </Text>
+                  );
+                }
+                if (filtered.length === 0) {
+                  return (
+                    <Text style={{ paddingVertical: 16, color: theme.colors.onSurfaceVariant }}>
+                      Aucune recette pour ce repas. Taguez des recettes pour ce creneau (ou
+                      laissez-les sans tag pour les rendre disponibles partout).
+                    </Text>
+                  );
+                }
+                return filtered.map((r) => (
                   <TouchableRipple
                     key={r.id}
                     onPress={() => onPickRecipe(r.id)}
@@ -715,8 +735,8 @@ export default function PlanningDayScreen() {
                       </View>
                     </View>
                   </TouchableRipple>
-                ))
-              )}
+                ));
+              })()}
             </ScrollView>
           </Dialog.ScrollArea>
           <Dialog.Actions>
