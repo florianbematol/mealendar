@@ -116,9 +116,9 @@ export default function PlanningRangeScreen() {
   const headerActionsRef = useRef<{
     onRandom: () => void;
     onLlm: () => void;
-    onClear: () => void;
+    onDuplicate: () => void;
     busy: boolean;
-  }>({ onRandom: () => {}, onLlm: () => {}, onClear: () => {}, busy: false });
+  }>({ onRandom: () => {}, onLlm: () => {}, onDuplicate: () => {}, busy: false });
 
   useLayoutEffect(() => {
     if (!fromDate || !toDate) return;
@@ -164,12 +164,12 @@ export default function PlanningRangeScreen() {
               }}
             />
             <Menu.Item
-              leadingIcon="delete-sweep-outline"
-              title="Tout effacer"
+              leadingIcon="content-duplicate"
+              title="Dupliquer cette plage"
               disabled={headerActionsRef.current.busy}
               onPress={() => {
                 setMenuOpen(false);
-                headerActionsRef.current.onClear();
+                headerActionsRef.current.onDuplicate();
               }}
             />
           </Menu>
@@ -604,7 +604,7 @@ export default function PlanningRangeScreen() {
   headerActionsRef.current = {
     onRandom: onGenerateRandom,
     onLlm: onGenerateLlm,
-    onClear: onClearRange,
+    onDuplicate: () => setDuplicateOpen(true),
     busy: setMeals.isPending || generateLlm.isPending,
   };
 
@@ -637,6 +637,29 @@ export default function PlanningRangeScreen() {
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]} edges={[]}>
+      {/* Barre d'actions fixe en haut, toujours visible */}
+      <View style={[styles.topBar, { borderBottomColor: theme.colors.outlineVariant }]}>
+        <Button
+          mode="outlined"
+          icon="delete-sweep-outline"
+          onPress={onClearRange}
+          disabled={setMeals.isPending || generateLlm.isPending}
+          style={styles.topBtn}
+          contentStyle={styles.btnContent}
+        >
+          Effacer
+        </Button>
+        <Button
+          mode="contained"
+          icon="check"
+          onPress={() => router.back()}
+          style={styles.topBtn}
+          contentStyle={styles.btnContent}
+        >
+          Terminer
+        </Button>
+      </View>
+
       <ScrollView
         contentContainerStyle={styles.container}
         refreshControl={
@@ -647,7 +670,7 @@ export default function PlanningRangeScreen() {
           />
         }
       >
-        {/* Indicateur de generation en cours (les actions sont dans le menu ...) */}
+        {/* Indicateur de generation en cours (Aleatoire/IA/Dupliquer sont dans le menu ...) */}
         {(setMeals.isPending || generateLlm.isPending) && (
           <View style={[styles.busyRow, { backgroundColor: theme.colors.primaryContainer }]}>
             <ActivityIndicator size="small" color={theme.colors.primary} />
@@ -866,30 +889,6 @@ export default function PlanningRangeScreen() {
             </Surface>
           );
         })}
-
-        {/* Boutons de fin de page : Dupliquer + Terminer */}
-        <View style={styles.bottomRow}>
-          <Button
-            mode="outlined"
-            icon="content-duplicate"
-            onPress={() => setDuplicateOpen(true)}
-            disabled={duplicateRange.isPending}
-            loading={duplicateRange.isPending}
-            style={styles.bottomBtn}
-            contentStyle={styles.btnContent}
-          >
-            Dupliquer
-          </Button>
-          <Button
-            mode="contained"
-            icon="check"
-            onPress={() => router.back()}
-            style={styles.bottomBtn}
-            contentStyle={styles.btnContent}
-          >
-            Terminer
-          </Button>
-        </View>
       </ScrollView>
 
       {/* Dialog de duplication : raccourcis +7j / +14j / +28j */}
@@ -1080,7 +1079,14 @@ const styles = StyleSheet.create({
   container: { padding: 16, gap: 12, paddingBottom: 32 },
 
   btnContent: { paddingVertical: 4 },
-  bottomRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  topBar: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  topBtn: { flex: 1, borderRadius: 12 },
   busyRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1089,7 +1095,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 12,
   },
-  bottomBtn: { flex: 1, borderRadius: 12 },
 
   dayCard: { padding: 12, borderRadius: 14, gap: 6 },
   dayHeader: {
