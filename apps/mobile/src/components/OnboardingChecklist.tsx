@@ -85,7 +85,7 @@ export function OnboardingChecklist() {
     },
     {
       key: 'planning',
-      label: 'Planifier cette semaine',
+      label: 'Faire votre premiere planification',
       description: 'Posez votre premier repas sur le calendrier.',
       icon: 'calendar-blank',
       done: hasMealsThisWeek,
