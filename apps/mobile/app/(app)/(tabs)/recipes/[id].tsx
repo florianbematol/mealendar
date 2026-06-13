@@ -39,7 +39,9 @@ export default function RecipeDetailScreen() {
   // Header dynamique
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: recipe.data?.title ?? 'Recette',
+      // Pas de titre dans le header : le titre est deja affiche en gros dans le
+      // corps de l'ecran (avec la description en dessous).
+      title: '',
       headerRight: () =>
         recipe.data && !editing ? (
           <View style={{ flexDirection: 'row' }}>
