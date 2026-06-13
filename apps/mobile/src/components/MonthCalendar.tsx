@@ -65,6 +65,8 @@ export type MonthCalendarProps = {
   ranges: MealPlanRange[];
   width: number;
   onDayPress: (date: string) => void;
+  /** Jour de debut de selection en cours (surligne), ou null. */
+  selStart?: string | null;
 };
 
 export const MonthCalendar = memo(function MonthCalendar({
@@ -72,6 +74,7 @@ export const MonthCalendar = memo(function MonthCalendar({
   ranges,
   width,
   onDayPress,
+  selStart,
 }: MonthCalendarProps) {
   const theme = useTheme();
   const today = todayIso();
@@ -143,6 +146,7 @@ export const MonthCalendar = memo(function MonthCalendar({
               {rowCells.map((date) => {
                 const inMonth = isSameMonth(date, month);
                 const isToday = date === today;
+                const isSelStart = !!selStart && date === selStart;
                 return (
                   <TouchableOpacity
                     key={date}
@@ -150,6 +154,10 @@ export const MonthCalendar = memo(function MonthCalendar({
                       styles.cell,
                       { borderColor: theme.colors.outlineVariant },
                       isToday && { backgroundColor: theme.colors.primaryContainer },
+                      isSelStart && {
+                        backgroundColor: theme.colors.primary,
+                        borderColor: theme.colors.primary,
+                      },
                     ]}
                     activeOpacity={0.6}
                     onPress={() => onDayPress(date)}
@@ -159,13 +167,15 @@ export const MonthCalendar = memo(function MonthCalendar({
                         style={[
                           styles.dayNum,
                           {
-                            color: isToday
-                              ? theme.colors.primary
-                              : inMonth
-                                ? theme.colors.onSurface
-                                : theme.colors.onSurfaceVariant,
+                            color: isSelStart
+                              ? theme.colors.onPrimary
+                              : isToday
+                                ? theme.colors.primary
+                                : inMonth
+                                  ? theme.colors.onSurface
+                                  : theme.colors.onSurfaceVariant,
                             opacity: inMonth ? 1 : 0.4,
-                            fontWeight: isToday ? '800' : '500',
+                            fontWeight: isToday || isSelStart ? '800' : '500',
                           },
                         ]}
                       >

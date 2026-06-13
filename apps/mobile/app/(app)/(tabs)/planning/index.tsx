@@ -4,7 +4,7 @@ import { SetupChip } from '@/components/SetupChip';
 import { Topbar } from '@/components/Topbar';
 import { useMyDietPlan } from '@/hooks/useDietPlans';
 import { useMealPlan, useMealPlanRanges } from '@/hooks/usePlannings';
-import { addMonths, formatMonthYear } from '@/lib/dates';
+import { addMonths, formatLongDate, formatMonthYear } from '@/lib/dates';
 import { useActiveHousehold } from '@/stores/activeHousehold';
 import type { MealPlanRange } from '@mealendar/shared';
 import dayjs from 'dayjs';
@@ -57,6 +57,10 @@ export default function PlanningIndexScreen() {
 
   const [showPicker, setShowPicker] = useState(false);
 
+  // Selection d'une plage sur la grille : 1er tap = debut, 2e tap = fin.
+  // null = pas de selection en cours.
+  const [selStart, setSelStart] = useState<string | null>(null);
+
   /** Map date -> plage existante (tap -> ouvrir la bonne vue). */
   const rangeForDate = useMemo(() => {
     const map = new Map<string, MealPlanRange>();
@@ -70,16 +74,29 @@ export default function PlanningIndexScreen() {
     return map;
   }, [ranges.data]);
 
+  const openRange = (from: string, to: string) => {
+    setSelStart(null);
+    router.push(`/(app)/(tabs)/planning/range/${from}/${to}`);
+  };
+
   const onDayPress = (date: string) => {
+    // Mode selection en cours : ce tap fixe la fin de la plage.
+    if (selStart) {
+      const [from, to] = selStart <= date ? [selStart, date] : [date, selStart];
+      openRange(from, to);
+      return;
+    }
+    // Jour dans une plage existante -> ouvre cette plage directement.
     const existing = rangeForDate.get(date);
     if (existing) {
-      router.push(`/(app)/(tabs)/planning/range/${existing.dateFrom}/${existing.dateTo}`);
-    } else {
-      // Jour hors plage : on ouvre la vue range avec ce seul jour (from=to).
-      // Les dates s'ajustent ensuite sur cet ecran.
-      router.push(`/(app)/(tabs)/planning/range/${date}/${date}`);
+      openRange(existing.dateFrom, existing.dateTo);
+      return;
     }
+    // Jour hors plage -> demarre une selection (debut). Le 2e tap fixera la fin.
+    setSelStart(date);
   };
+
+  const cancelSelection = () => setSelStart(null);
 
   // ---------------------------------------------------------------------------
   // Slide horizontal entre mois (Animated natif, sans reanimated)
@@ -211,6 +228,21 @@ export default function PlanningIndexScreen() {
           </View>
         </View>
 
+        {/* Bandeau de selection : visible apres le 1er tap, en attente du 2e. */}
+        {selStart && (
+          <View style={[styles.selBanner, { backgroundColor: theme.colors.primaryContainer }]}>
+            <Text
+              style={[styles.selBannerText, { color: theme.colors.onPrimaryContainer }]}
+              numberOfLines={1}
+            >
+              Debut : {formatLongDate(selStart)} — choisissez la fin
+            </Text>
+            <Button mode="text" compact onPress={cancelSelection} labelStyle={styles.selBannerBtn}>
+              Annuler
+            </Button>
+          </View>
+        )}
+
         {/* Ruban de mois pre-rendus (fenetre -WINDOW..+WINDOW autour de l'offset).
             Chaque mois est positionne en absolu a left = slideOffset * screenW ;
             le ruban est translate pour centrer l'offset courant. Les voisins
@@ -229,6 +261,7 @@ export default function PlanningIndexScreen() {
                     ranges={allRanges}
                     width={screenW}
                     onDayPress={onDayPress}
+                    selStart={selStart}
                   />
                 </View>
               );
@@ -261,6 +294,18 @@ const styles = StyleSheet.create({
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   todayBtn: { marginRight: -4 },
   todayBtnLabel: { fontSize: 13, marginVertical: 0 },
+  selBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginHorizontal: 12,
+    marginBottom: 4,
+    paddingLeft: 12,
+    paddingRight: 4,
+    borderRadius: 12,
+  },
+  selBannerText: { flex: 1, fontSize: 13, fontWeight: '600' },
+  selBannerBtn: { fontSize: 13, marginVertical: 4 },
   // Le viewport masque les mois hors ecran.
   carouselViewport: { flex: 1, overflow: 'hidden' },
   // Le ruban occupe tout le viewport ; les slides sont positionnes en absolu.
