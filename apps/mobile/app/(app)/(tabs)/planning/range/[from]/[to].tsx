@@ -32,7 +32,7 @@ import {
 import * as FileSystem from 'expo-file-system';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as Sharing from 'expo-sharing';
-import { useLayoutEffect, useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
@@ -40,6 +40,7 @@ import {
   Chip,
   Dialog,
   IconButton,
+  Menu,
   Portal,
   Surface,
   Text,
@@ -90,6 +91,7 @@ export default function PlanningRangeScreen() {
   const duplicateRange = useDuplicateMealsRange(householdId ?? '');
 
   const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const memberCount = Math.max(1, household.data?.members.length ?? 4);
 
@@ -109,6 +111,15 @@ export default function PlanningRangeScreen() {
     components: DietComponent[];
   } | null>(null);
 
+  // Ref vers les dernieres actions/etats, pour que le Menu du header appelle
+  // toujours des closures fraiches sans avoir a recreer le headerRight.
+  const headerActionsRef = useRef<{
+    onRandom: () => void;
+    onLlm: () => void;
+    onClear: () => void;
+    busy: boolean;
+  }>({ onRandom: () => {}, onLlm: () => {}, onClear: () => {}, busy: false });
+
   useLayoutEffect(() => {
     if (!fromDate || !toDate) return;
     const fromLabel = formatShortDate(fromDate);
@@ -117,7 +128,7 @@ export default function PlanningRangeScreen() {
     navigation.setOptions({
       title,
       headerRight: () => (
-        <View style={{ flexDirection: 'row' }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
           <IconButton
             icon="cart-outline"
             size={20}
@@ -129,11 +140,44 @@ export default function PlanningRangeScreen() {
             }
           />
           <IconButton icon="calendar-export" size={20} onPress={() => onExportIcs()} />
+          <Menu
+            visible={menuOpen}
+            onDismiss={() => setMenuOpen(false)}
+            anchor={<IconButton icon="dots-vertical" size={20} onPress={() => setMenuOpen(true)} />}
+          >
+            <Menu.Item
+              leadingIcon="dice-multiple-outline"
+              title="Remplir aleatoirement"
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onRandom();
+              }}
+            />
+            <Menu.Item
+              leadingIcon="auto-fix"
+              title="Generer avec l'IA"
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onLlm();
+              }}
+            />
+            <Menu.Item
+              leadingIcon="delete-sweep-outline"
+              title="Tout effacer"
+              disabled={headerActionsRef.current.busy}
+              onPress={() => {
+                setMenuOpen(false);
+                headerActionsRef.current.onClear();
+              }}
+            />
+          </Menu>
         </View>
       ),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navigation, fromDate, toDate, dayCount]);
+  }, [navigation, fromDate, toDate, dayCount, menuOpen]);
 
   const allMeals = meals.data?.meals ?? [];
 
@@ -556,6 +600,14 @@ export default function PlanningRangeScreen() {
   // ===========================================================================
   // Render
   // ===========================================================================
+  // Met a jour la ref consommee par le Menu du header a chaque render.
+  headerActionsRef.current = {
+    onRandom: onGenerateRandom,
+    onLlm: onGenerateLlm,
+    onClear: onClearRange,
+    busy: setMeals.isPending || generateLlm.isPending,
+  };
+
   if (!fromDate || !toDate) {
     return (
       <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
@@ -595,41 +647,15 @@ export default function PlanningRangeScreen() {
           />
         }
       >
-        {/* Actions globales sur le range */}
-        <View style={styles.actionsRow}>
-          <Button
-            mode="contained"
-            icon="dice-multiple-outline"
-            onPress={onGenerateRandom}
-            loading={setMeals.isPending && !generateLlm.isPending}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            Aleatoire
-          </Button>
-          <Button
-            mode="contained-tonal"
-            icon="auto-fix"
-            onPress={onGenerateLlm}
-            loading={generateLlm.isPending}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            IA
-          </Button>
-          <Button
-            mode="outlined"
-            icon="delete-sweep-outline"
-            onPress={onClearRange}
-            disabled={setMeals.isPending || generateLlm.isPending}
-            style={styles.flexBtn}
-            contentStyle={styles.btnContent}
-          >
-            Effacer
-          </Button>
-        </View>
+        {/* Indicateur de generation en cours (les actions sont dans le menu ...) */}
+        {(setMeals.isPending || generateLlm.isPending) && (
+          <View style={[styles.busyRow, { backgroundColor: theme.colors.primaryContainer }]}>
+            <ActivityIndicator size="small" color={theme.colors.primary} />
+            <Text variant="labelLarge" style={{ color: theme.colors.onPrimaryContainer }}>
+              {generateLlm.isPending ? 'Generation IA en cours…' : 'Mise a jour des repas…'}
+            </Text>
+          </View>
+        )}
 
         {/* Une carte par jour */}
         {dates.map((date) => {
@@ -1053,11 +1079,16 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   container: { padding: 16, gap: 12, paddingBottom: 32 },
 
-  actionsRow: { flexDirection: 'row', gap: 8 },
-  flexBtn: { flex: 1, borderRadius: 12 },
   btnContent: { paddingVertical: 4 },
-  doneBtn: { borderRadius: 12, marginTop: 8 },
   bottomRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  busyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+  },
   bottomBtn: { flex: 1, borderRadius: 12 },
 
   dayCard: { padding: 12, borderRadius: 14, gap: 6 },
