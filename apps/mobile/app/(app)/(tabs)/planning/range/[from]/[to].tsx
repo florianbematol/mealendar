@@ -2,10 +2,12 @@ import { DietComponentChips } from '@/components/DietComponentChips';
 import { GenerateRecipeModal } from '@/components/GenerateRecipeModal';
 import { useHouseholdDetail } from '@/hooks/useHouseholds';
 import {
+  useDeleteMealPlanRange,
   useDeletePlannedMeal,
   useDuplicateMealsRange,
   useGeneratePlanningWithLlm,
   useMealPlan,
+  useMealPlanRanges,
   useMealsRange,
   useSetMealsRange,
   useUpdatePlannedMeal,
@@ -89,6 +91,8 @@ export default function PlanningRangeScreen() {
   const deleteMeal = useDeletePlannedMeal(householdId ?? '');
   const generateLlm = useGeneratePlanningWithLlm(householdId ?? '');
   const duplicateRange = useDuplicateMealsRange(householdId ?? '');
+  const allRanges = useMealPlanRanges(householdId);
+  const deleteRange = useDeleteMealPlanRange(householdId ?? '');
 
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -340,6 +344,47 @@ export default function PlanningRangeScreen() {
         },
       },
     ]);
+  };
+
+  /**
+   * Supprime completement cette plage : vide les repas de [from,to] ET supprime
+   * la/les etiquette(s) de plage qui chevauchent la periode. Puis revient.
+   */
+  const onDeleteRange = () => {
+    Alert.alert(
+      'Supprimer la plage',
+      'Supprime cette plage du calendrier ET tous ses repas (y compris verrouilles). Action irreversible.',
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'Supprimer',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // 1. Vide les repas de la periode (sans garder les verrouilles).
+              await setMeals.mutateAsync({
+                dateFrom: fromDate,
+                dateTo: toDate,
+                meals: [],
+                keepLocked: false,
+              });
+              // 2. Supprime les etiquettes de plage qui chevauchent [from,to].
+              const overlapping = (allRanges.data ?? []).filter(
+                (r) => !(r.dateTo < fromDate || r.dateFrom > toDate),
+              );
+              for (const r of overlapping) {
+                await deleteRange.mutateAsync(r.id);
+              }
+              haptics.success();
+              router.back();
+            } catch (e) {
+              haptics.error();
+              Alert.alert('Erreur', e instanceof Error ? e.message : 'Erreur inconnue');
+            }
+          },
+        },
+      ],
+    );
   };
 
   const onExportIcs = async () => {
@@ -639,6 +684,15 @@ export default function PlanningRangeScreen() {
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.background }]} edges={[]}>
       {/* Barre d'actions fixe en haut, toujours visible */}
       <View style={[styles.topBar, { borderBottomColor: theme.colors.outlineVariant }]}>
+        <IconButton
+          icon="trash-can-outline"
+          mode="outlined"
+          iconColor={theme.colors.error}
+          containerColor={theme.colors.errorContainer}
+          onPress={onDeleteRange}
+          disabled={setMeals.isPending || generateLlm.isPending || deleteRange.isPending}
+          style={styles.deleteBtn}
+        />
         <Button
           mode="outlined"
           icon="delete-sweep-outline"
@@ -1081,12 +1135,14 @@ const styles = StyleSheet.create({
   btnContent: { paddingVertical: 4 },
   topBar: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   topBtn: { flex: 1, borderRadius: 12 },
+  deleteBtn: { margin: 0, borderRadius: 12 },
   busyRow: {
     flexDirection: 'row',
     alignItems: 'center',
