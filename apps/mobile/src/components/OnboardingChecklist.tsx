@@ -89,7 +89,7 @@ export function OnboardingChecklist() {
       description: 'Posez votre premier repas sur le calendrier.',
       icon: 'calendar-blank',
       done: hasMealsThisWeek,
-      onPress: () => router.push(`/(app)/(tabs)/planning/range/${weekRange.from}/${weekRange.to}`),
+      onPress: () => router.push('/(app)/(tabs)/planning'),
     },
   ];
 
