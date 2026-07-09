@@ -16,7 +16,7 @@
   "dependencies": {
     "@expo/metro-runtime": "~6.1.2",
     "@mealendar/shared": "workspace:*",
-    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-async-storage/async-storage": "3.1.0",
     "@supabase/supabase-js": "2.106.1",
     "@tanstack/react-query": "5.62.7",
     "expo": "~54.0.34",
