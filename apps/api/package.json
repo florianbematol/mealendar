@@ -14,9 +14,9 @@
   },
   "dependencies": {
     "@mealendar/shared": "workspace:*",
-    "@supabase/supabase-js": "2.106.1",
-    "hono": "4.12.22",
-    "jose": "6.2.3",
+    "@supabase/supabase-js": "2.112.3",
+    "hono": "4.13.3",
+    "jose": "6.2.9",
     "zod": "3.23.8"
   },
   "devDependencies": {
@@ -24,6 +24,6 @@
     "@vitest/coverage-v8": "2.1.8",
     "typescript": "5.9.3",
     "vitest": "2.1.8",
-    "wrangler": "4.94.0"
+    "wrangler": "4.125.0"
   }
 }
